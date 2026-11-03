@@ -1,0 +1,94 @@
+# ===== 依赖 =====
+node_modules/
+package-lock.json.bak
+.pnp
+.pnp.js
+
+# ===== 构建输出 =====
+dist/
+dist-electron/
+out/
+release/
+build/
+
+# ===== electron-builder 输出 =====
+*.exe
+*.dmg
+*.deb
+*.rpm
+*.AppImage
+*.zip
+*.tar.gz
+
+# ===== 日志 =====
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+pnpm-debug.log*
+
+# ===== 缓存 =====
+.cache/
+.parcel-cache/
+.eslintcache
+.turbo/
+.vite/
+*.tsbuildinfo
+
+# ===== 环境变量 =====
+.env
+.env.local
+.env.*.local
+
+# ===== 测试覆盖率 =====
+coverage/
+.nyc_output/
+.cypress/
+
+# ===== 编辑器 / IDE =====
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# ===== macOS =====
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+.DocumentRevisions-Version
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# ===== Windows =====
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+*.stackdump
+[Dd]esktop.ini
+$RECYCLE.BIN/
+
+# ===== Linux =====
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+
+# ===== 其他 =====
+.tmp/
+.temp/
