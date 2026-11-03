@@ -1,0 +1,22 @@
+:root {
+  color-scheme: dark;
+}
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: #0f1115;
+}
+* {
+  box-sizing: border-box;
+}
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: #333a45;
+  border-radius: 4px;
+}
