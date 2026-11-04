@@ -22,11 +22,11 @@ export const TOOL_SCHEMAS: ToolSchemaDef[] = [
   { name: 'get_data_stats', description: '本地数据统计：股票数、K 线行数、数据日期范围', zodShape: {} },
   { name: 'trigger_data_update', description: '触发当日数据增量更新（异步任务，已在运行则忽略；检测到数据缺失时可主动调用）', zodShape: {} },
   { name: 'web_search', description: '联网搜索最新信息（行情动态、政策新闻、公司公告、市场资讯），返回中文总结与来源链接。需要最新/实时信息时使用。', zodShape: { query: z.string().describe('搜索关键词或问题') } },
-  // —— 策略管理 ——
-  { name: 'create_strategy', description: '创建新策略（声明式 DSL，JSON 字符串；白名单指标校验失败会报错）', zodShape: { name: z.string(), dslJson: z.string().describe('策略 DSL JSON 字符串'), rationale: z.string().default('') } },
-  { name: 'update_strategy', description: '更新策略 DSL（生成新版本留档）', zodShape: { strategyId: z.string(), dslJson: z.string(), changeLog: z.string().default('Agent 更新') } },
-  { name: 'list_strategies', description: '列出策略库（全局共享：所有账户共用）', zodShape: {} },
-  { name: 'get_strategy', description: '获取策略详情（DSL）', zodShape: { strategyId: z.string() } },
+  // —— 策略管理（每账户唯一一份：Markdown 策略文档 + 用户偏好；偏好只读，仅用户可改） ——
+  { name: 'create_strategy', description: '首次为账户生成策略文档（Markdown，必须内嵌一个 ```dsl 代码块作为可执行部分；账户已有策略时改用 update_strategy）', zodShape: { name: z.string(), markdown: z.string().describe('策略 Markdown 文档（含 ```dsl JSON 代码块）'), rationale: z.string().default('') } },
+  { name: 'update_strategy', description: '迭代账户唯一策略的 Markdown 文档（新版本留档；不得修改用户偏好；```dsl 块同步执行层，无块则为纯文档态）', zodShape: { name: z.string().optional(), markdown: z.string(), rationale: z.string().default('') } },
+  { name: 'list_strategies', description: '获取当前账户的唯一策略（含用户偏好，只读）', zodShape: {} },
+  { name: 'get_strategy', description: '获取当前账户唯一策略详情（Markdown 文档 + DSL + 偏好）', zodShape: {} },
   { name: 'activate_strategy', description: '激活策略进入运行（受限操作：需人工批准流程）', zodShape: { strategyId: z.string() } },
   { name: 'deactivate_strategy', description: '停用策略（受限操作：纠正类动作，需批准流程）', zodShape: { strategyId: z.string(), reason: z.string().default('') } },
   // —— 回测 ——
@@ -39,6 +39,7 @@ export const TOOL_SCHEMAS: ToolSchemaDef[] = [
   { name: 'get_account_summary', description: '当前活跃账户概览：仓位、现金、持仓明细', zodShape: {} },
   { name: 'get_positions', description: '当前活跃账户持仓列表（人工维护）', zodShape: {} },
   { name: 'list_trade_records', description: '当前活跃账户成交记录（人工执行回填）', zodShape: { limit: z.number().int().min(1).max(500).default(100) } },
+  { name: 'get_chat_history', description: '读取当前活跃账户的对话流历史（用户消息与 Agent 回复）', zodShape: { limit: z.number().int().min(1).max(100).default(30) } },
   { name: 'check_risk', description: '对拟生成的信号执行风控检查（只读校验）', zodShape: { code: z.string(), side: z.enum(['buy', 'sell']), qty: z.number(), refPrice: z.number() } },
   { name: 'publish_signal', description: '产出交易建议（信号）：需经风控校验后落库推送', zodShape: { runId: z.string(), strategyId: z.string(), code: z.string(), side: z.enum(['buy', 'sell']), qty: z.number().int(), refPrice: z.number(), basis: z.string().describe('触发依据说明') } },
   { name: 'list_signals', description: '当前活跃账户信号列表（含人工反馈状态）', zodShape: { limit: z.number().int().min(1).max(500).default(100) } },
@@ -53,7 +54,7 @@ export const TOOL_SCHEMAS: ToolSchemaDef[] = [
   { name: 'get_performance', description: '当前活跃账户绩效：净值指标、信号执行偏差、成交统计', zodShape: {} },
   // —— 汇报、计划与审计（系统状态自查） ——
   { name: 'list_reports', description: '汇报流列表（含待决策事项状态）', zodShape: { limit: z.number().int().min(1).max(200).default(50) } },
-  { name: 'report_to_user', description: '向用户汇报（分级：result/summary/need_decision）', zodShape: { level: z.enum(['result', 'summary', 'need_decision']), title: z.string(), summary: z.string(), decisionJson: z.string().optional().describe('need_decision 时的决策选项 JSON') } },
+  { name: 'report_to_user', description: '向用户汇报（分级：result/summary/need_decision；汇报会进入首页对话流）', zodShape: { level: z.enum(['result', 'summary', 'need_decision']), title: z.string(), summary: z.string(), decisionJson: z.string().optional().describe('need_decision 时的决策选项 JSON') } },
   { name: 'get_plan', description: '当前阶段性行动计划', zodShape: { limit: z.number().int().min(1).max(20).default(5) } },
   { name: 'list_work_items', description: '工作项列表（Agent 任务队列状态自查）', zodShape: { limit: z.number().int().min(1).max(200).default(50) } },
   { name: 'list_audit_logs', description: '操作审计日志（按时间倒序）', zodShape: { limit: z.number().int().min(1).max(200).default(50) } },

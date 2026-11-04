@@ -1,5 +1,6 @@
 appId: com.daydream.app
 productName: Daydream
+copyright: Copyright © 2026 Daydream Team
 directories:
   buildResources: resources
   output: release
@@ -12,10 +13,16 @@ mac:
     - dmg
     - zip
   category: public.app-category.finance
+  minimumSystemVersion: '10.15'
+  extendInfo:
+    # Finder / 菜单栏 / 关于面板显示名
+    CFBundleDisplayName: Daydream
 win:
   target:
     - nsis
 nsis:
   oneClick: false
   allowToChangeInstallationDirectory: true
+  # 开始菜单 / 桌面快捷方式显示名（安装目录保持英文 productName）
+  shortcutName: Daydream
 npmRebuild: true

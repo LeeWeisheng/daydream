@@ -4,21 +4,21 @@
  */
 import type {
   Account,
+  AccountSummary,
   Alert,
-  AutonomyLevel,
-  BacktestRun,
-  BacktestTrade,
   Bar,
-  EventLogEntry,
+  ChatMessage,
   ModelConfig,
+  ModelPreset,
   Position,
-  Quote,
   Report,
-  ReviewReport,
-  RunInstance,
+  RunMode,
   Signal,
   StockBasic,
   Strategy,
+  StrategyPreferences,
+  StrategyVersion,
+  ThemeMode,
   TradeRecord,
   UiEvent,
   WorkItem
@@ -30,32 +30,55 @@ export const IPC = {
   accountCreate: 'account:create',
   accountSwitch: 'account:switch',
   accountDelete: 'account:delete',
+  accountRename: 'account:rename',
   // 设置
   settingsGet: 'settings:get',
   settingsUpdate: 'settings:update',
+  // 主题
+  themeGet: 'theme:get',
+  themeSet: 'theme:set',
+  // 运行模式（manual 手动 / auto 自动：自动处理审批与信号，用于策略验证）
+  runModeGet: 'runMode:get',
+  runModeSet: 'runMode:set',
+  // 窗口控制（自绘标题栏）
+  windowMinimize: 'window:minimize',
+  windowToggleMaximize: 'window:toggleMaximize',
+  windowClose: 'window:close',
+  windowIsMaximized: 'window:isMaximized',
+  windowIsFullScreen: 'window:isFullScreen',
   // 行情数据
   dataGetKline: 'data:getKline',
   dataGetQuote: 'data:getQuote',
   dataGetStockList: 'data:getStockList',
+  dataGetIndexDaily: 'data:getIndexDaily',
   dataGetDataStatus: 'data:getDataStatus',
+  dataGetDataStats: 'data:getDataStats',
   dataInitialSync: 'data:initialSync',
   dataDailyUpdate: 'data:dailyUpdate',
-  // 策略
-  strategyList: 'strategy:list',
-  strategyGet: 'strategy:get',
-  strategyCreate: 'strategy:create',
-  strategyUpdate: 'strategy:update',
+  // 数据 CRUD（Agent 运行时可用）
+  dataUpsertStock: 'data:upsertStock',
+  dataDeleteStock: 'data:deleteStock',
+  dataUpsertKline: 'data:upsertKline',
+  dataDeleteKline: 'data:deleteKline',
+  // 策略（每账户唯一一份：交易策略 DSL + 用户偏好）
+  strategyGetForAccount: 'strategy:getForAccount',
+  strategySave: 'strategy:save',
+  strategyGetVersions: 'strategy:getVersions',
+  strategyRollback: 'strategy:rollback',
   strategyActivate: 'strategy:activate',
   strategyDeactivate: 'strategy:deactivate',
-  // 回测
-  backtestStart: 'backtest:start',
-  backtestCancel: 'backtest:cancel',
-  backtestList: 'backtest:list',
-  backtestGetResult: 'backtest:getResult',
-  backtestGetTrades: 'backtest:getTrades',
+  strategyGetLatestBacktest: 'strategy:getLatestBacktest',
+  // 交易（人工录入，联动资金与持仓）
+  tradeOrder: 'trade:order',
+  tradeList: 'trade:list',
+  tradeAccountSummary: 'trade:accountSummary',
+  tradeSetInitialCash: 'trade:setInitialCash',
   // 信号
   signalList: 'signal:list',
   signalFeedback: 'signal:feedback',
+  // 持仓
+  positionList: 'position:list',
+  positionUpsert: 'position:upsert',
   // 预警
   alertList: 'alert:list',
   alertAcknowledge: 'alert:acknowledge',
@@ -70,22 +93,11 @@ export const IPC = {
   // 汇报（待决策）
   reportList: 'report:list',
   reportRespond: 'report:respond',
-  // 绩效
-  perfGetSnapshot: 'perf:getSnapshot',
-  perfGetCharts: 'perf:getCharts',
-  // 复盘
-  reviewList: 'review:list',
-  reviewGetReport: 'review:getReport',
-  // 持仓与成交
-  positionList: 'position:list',
-  positionUpsert: 'position:upsert',
-  tradeList: 'trade:list',
-  tradeCreate: 'trade:create',
-  // 审计
-  auditList: 'audit:list',
-  eventList: 'event:list',
-  // 对话
+  // 对话流
   chatSend: 'chat:send',
+  chatList: 'chat:list',
+  // 审计事件（规划页事件流水）
+  eventList: 'event:list',
   // 统一事件流（主 → 渲染）
   uiEvent: 'daydream:event'
 } as const
@@ -97,28 +109,40 @@ export interface AccountCreateReq {
 export interface AccountSwitchReq {
   accountId: string
 }
+export interface AccountRenameReq {
+  accountId: string
+  name: string
+}
 
 export interface SettingsPatch {
   modelConfig?: ModelConfig
-  autonomyLevel?: AutonomyLevel
   monitorIntervalMinutes?: number
   dataSourcePreference?: string
-  riskRules?: Record<string, unknown>
+  initYears?: number
 }
 
-export interface StrategyCreateReq {
+export interface StrategySaveReq {
   accountId: string
-  name: string
-  dslJson: string
-  rationale?: string
-  createdBy: string
+  /** 策略名称 */
+  name?: string
+  /** 策略文档（Markdown；用户与 Agent 均可改，新版本留档；```dsl 块自动同步 dsl_json） */
+  markdown?: string
+  /** 用户偏好（仅用户可改；主进程校验 actor=user） */
+  preferencesJson?: string
+  changeLog?: string
+  actor: 'user' | 'agent'
 }
 
-export interface BacktestStartReq {
-  strategyVersionId: string
-  start: string
-  end: string
-  sampleOutEnd?: string // 样本外分段起点（可选）
+export interface TradeOrderReq {
+  accountId: string
+  code: string
+  side: 'buy' | 'sell'
+  price: number
+  qty: number
+  fee?: number
+  tradedAt?: string
+  signalId?: string
+  note?: string
 }
 
 export interface SignalFeedbackReq {
@@ -142,21 +166,37 @@ export interface PositionUpsertReq {
   costPrice: number
 }
 
-export interface TradeCreateReq {
-  accountId: string
-  code: string
-  side: 'buy' | 'sell'
-  price: number
-  qty: number
-  fee: number
-  tradedAt: string
-  signalId?: string
-  note?: string
-}
-
 export interface ChatSendReq {
   accountId: string
   message: string
+}
+
+export interface ChatListOpts {
+  limit?: number
+  /** 向上翻页游标：拉取比该消息更早的一页 */
+  before?: { createdAt: string; rowid: number }
+  /** 增量拉取：比该消息更新的消息 */
+  after?: { createdAt: string; rowid: number }
+}
+
+export interface StockUpsertReq {
+  code: string
+  name: string
+  exchange: 'SH' | 'SZ' | 'BJ'
+  industry?: string
+  status?: string
+}
+
+export interface KlineUpsertReq {
+  code: string
+  date: string
+  open: number
+  high: number
+  low: number
+  close: number
+  volume: number
+  amount: number
+  adjFactor?: number
 }
 
 // ---------- preload 暴露的 API 形状 ----------
@@ -165,38 +205,71 @@ export interface DaydreamApi {
     list(): Promise<Account[]>
     create(req: AccountCreateReq): Promise<Account>
     switchTo(req: AccountSwitchReq): Promise<Account>
+    rename(req: AccountRenameReq): Promise<Account>
     remove(accountId: string): Promise<void>
   }
   settings: {
-    get(accountId: string): Promise<{ modelConfig?: ModelConfig; autonomyLevel?: AutonomyLevel; monitorIntervalMinutes?: number; modelConfigured: boolean }>
-    update(accountId: string, patch: SettingsPatch): Promise<void>
+    get(accountId: string): Promise<{
+      modelConfig?: ModelConfig
+      presets: ModelPreset[]
+      theme: ThemeMode
+      modelConfigured: boolean
+      monitorIntervalMinutes?: number
+      dataSourcePreference?: string
+    }>
+    update(patch: SettingsPatch): Promise<void>
+  }
+  theme: {
+    get(): Promise<ThemeMode>
+    set(mode: ThemeMode): Promise<ThemeMode>
+  }
+  runMode: {
+    get(): Promise<RunMode>
+    set(mode: RunMode): Promise<RunMode>
+  }
+  window: {
+    minimize(): Promise<void>
+    toggleMaximize(): Promise<boolean>
+    close(): Promise<void>
+    isMaximized(): Promise<boolean>
+    isFullScreen(): Promise<boolean>
   }
   data: {
     getStockList(): Promise<StockBasic[]>
-    getQuote(codes: string[]): Promise<Quote[]>
+    getQuote(codes: string[]): Promise<{ code: string; name: string; price: number; pctChg: number; ts: string }[]>
     getKline(code: string, start: string, end: string): Promise<Bar[]>
+    getIndexDaily(code: string, start: string, end: string): Promise<Bar[]>
     getDataStatus(): Promise<Record<string, unknown>[]>
+    getDataStats(): Promise<Record<string, unknown>>
     initialSync(): Promise<{ started: boolean }>
     dailyUpdate(): Promise<{ started: boolean }>
+    upsertStock(req: StockUpsertReq): Promise<void>
+    deleteStock(code: string): Promise<void>
+    upsertKline(req: KlineUpsertReq): Promise<void>
+    deleteKline(code: string, date: string): Promise<void>
   }
-  strategies: {
-    list(accountId: string): Promise<Strategy[]>
-    get(id: string): Promise<Strategy>
-    create(req: StrategyCreateReq): Promise<Strategy>
-    update(id: string, dslJson: string, changeLog: string): Promise<Strategy>
-    activate(id: string): Promise<void>
-    deactivate(id: string): Promise<void>
+  strategy: {
+    getForAccount(accountId: string): Promise<Strategy | null>
+    save(req: StrategySaveReq): Promise<Strategy>
+    getVersions(strategyId: string): Promise<StrategyVersion[]>
+    rollback(strategyId: string, versionId: string): Promise<Strategy>
+    activate(accountId: string): Promise<void>
+    deactivate(accountId: string): Promise<void>
+    getLatestBacktest(accountId: string): Promise<Record<string, unknown> | null>
   }
-  backtests: {
-    start(req: BacktestStartReq): Promise<{ runId: string }>
-    cancel(runId: string): Promise<void>
-    list(accountId: string): Promise<BacktestRun[]>
-    getResult(runId: string): Promise<BacktestRun>
-    getTrades(runId: string): Promise<BacktestTrade[]>
+  trades: {
+    order(req: TradeOrderReq): Promise<void>
+    list(accountId: string): Promise<TradeRecord[]>
+    accountSummary(accountId: string): Promise<AccountSummary>
+    setInitialCash(accountId: string, cash: number): Promise<void>
   }
   signals: {
     list(accountId: string, limit?: number): Promise<Signal[]>
     feedback(req: SignalFeedbackReq): Promise<void>
+  }
+  positions: {
+    list(accountId: string): Promise<Position[]>
+    upsert(req: PositionUpsertReq): Promise<void>
   }
   alerts: {
     list(accountId: string): Promise<Alert[]>
@@ -206,7 +279,7 @@ export interface DaydreamApi {
     getWorkItems(accountId: string): Promise<WorkItem[]>
     retryWorkItem(id: string): Promise<void>
     cancelWorkItem(id: string): Promise<void>
-    getPlan(accountId: string): Promise<unknown[]>
+    getPlan(accountId: string): Promise<Record<string, unknown>[]>
     getStatus(): Promise<{ active: boolean; running: boolean; lastTickAt?: string }>
     start(): Promise<void>
     stop(): Promise<void>
@@ -215,31 +288,14 @@ export interface DaydreamApi {
     list(accountId: string): Promise<Report[]>
     respond(req: ReportRespondReq): Promise<void>
   }
-  perf: {
-    getSnapshot(accountId: string): Promise<Record<string, unknown>[]>
-    getCharts(accountId: string): Promise<Record<string, unknown>>
-  }
-  reviews: {
-    list(accountId: string): Promise<ReviewReport[]>
-    getReport(id: string): Promise<ReviewReport>
-  }
-  positions: {
-    list(accountId: string): Promise<Position[]>
-    upsert(req: PositionUpsertReq): Promise<void>
-  }
-  trades: {
-    list(accountId: string): Promise<TradeRecord[]>
-    create(req: TradeCreateReq): Promise<void>
-  }
-  audit: {
-    list(accountId: string, limit?: number): Promise<Record<string, unknown>[]>
-    events(accountId: string, limit?: number): Promise<EventLogEntry[]>
-  }
   chat: {
     send(req: ChatSendReq): Promise<{ accepted: boolean }>
+    list(accountId: string, opts?: ChatListOpts): Promise<{ messages: ChatMessage[]; hasMore: boolean }>
   }
-  runs: {
-    list(accountId: string): Promise<RunInstance[]>
+  events: {
+    list(accountId: string, limit?: number): Promise<{ id: number; type: string; payloadJson: string; occurredAt: string }[]>
   }
   onEvent(cb: (ev: UiEvent) => void): () => void
 }
+
+export type { StrategyPreferences }

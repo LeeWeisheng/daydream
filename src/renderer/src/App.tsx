@@ -1,57 +1,35 @@
 /**
- * App 布局：左导航（页面）+ 顶栏（账户切换器、Agent 状态灯、待决策角标、通知中心）+ 内容区。
- * 页面：仪表盘 / 行情 / 策略中心 / 回测 / 运行与信号 / 盯盘 / 复盘 / 待决策中心 / 审计 / 设置。
+ * App 布局：header（自绘标题栏）+ sider（自研导航 shadcn 风格）+ content。
+ * 页面：首页 / 交易 / 策略 / 规划 / 数据 / 设置（与导航无关的功能已删除）。
+ * 主题：AppThemeProvider（antd-style）统一配置 antd token / 组件 token / 全局样式。
  */
 import { useEffect, useState } from 'react'
-import { Layout, Menu, Select, Badge, Tag, Button, Space, message } from 'antd'
-import {
-  DashboardOutlined,
-  LineChartOutlined,
-  ExperimentOutlined,
-  HistoryOutlined,
-  SendOutlined,
-  EyeOutlined,
-  FileTextOutlined,
-  CheckSquareOutlined,
-  AuditOutlined,
-  SettingOutlined,
-  RobotOutlined,
-  PlayCircleOutlined,
-  PauseCircleOutlined
-} from '@ant-design/icons'
+import { message } from 'antd'
 import { useAppStore } from './stores'
-import AccountSetup from './pages/AccountSetup'
+import { AppThemeProvider } from './theme'
+import AppHeader from './components/AppHeader'
+import NavSide from './components/NavSide'
 import ModelConfigModal from './components/ModelConfigModal'
-import Dashboard from './pages/Dashboard'
-import Market from './pages/Market'
-import Strategies from './pages/Strategies'
-import Backtests from './pages/Backtests'
-import Signals from './pages/Signals'
-import Monitor from './pages/Monitor'
-import Reviews from './pages/Reviews'
-import Decisions from './pages/Decisions'
-import AuditPage from './pages/Audit'
+import AccountSetup from './pages/AccountSetup'
+import Home from './pages/Home'
+import Trade from './pages/Trade'
+import StrategyPage from './pages/Strategy'
+import Plan from './pages/Plan'
+import Data from './pages/Data'
 import Settings from './pages/Settings'
 
-const { Sider, Header, Content } = Layout
-
-const PAGES: Record<string, { label: string; icon: React.ReactNode; node: React.ReactNode }> = {
-  dashboard: { label: '仪表盘', icon: <DashboardOutlined />, node: <Dashboard /> },
-  market: { label: '行情', icon: <LineChartOutlined />, node: <Market /> },
-  strategies: { label: '策略中心', icon: <ExperimentOutlined />, node: <Strategies /> },
-  backtests: { label: '回测', icon: <HistoryOutlined />, node: <Backtests /> },
-  signals: { label: '运行与信号', icon: <SendOutlined />, node: <Signals /> },
-  monitor: { label: '盯盘', icon: <EyeOutlined />, node: <Monitor /> },
-  reviews: { label: '复盘', icon: <FileTextOutlined />, node: <Reviews /> },
-  decisions: { label: '待决策中心', icon: <CheckSquareOutlined />, node: <Decisions /> },
-  audit: { label: '审计', icon: <AuditOutlined />, node: <AuditPage /> },
-  settings: { label: '设置', icon: <SettingOutlined />, node: <Settings /> }
+const PAGES: Record<string, { title: string; node: React.ReactNode }> = {
+  home: { title: '首页', node: <Home /> },
+  trade: { title: '交易', node: <Trade /> },
+  strategy: { title: '策略', node: <StrategyPage /> },
+  plan: { title: '规划', node: <Plan /> },
+  data: { title: '数据', node: <Data /> },
+  settings: { title: '设置', node: <Settings /> }
 }
 
-export default function App(): React.ReactNode {
-  const { accounts, currentAccount, agentActive, agentRunning, init, switchAccount, lastEvent, startAgent, stopAgent } = useAppStore()
-  const [page, setPage] = useState('dashboard')
-  const [pendingCount, setPendingCount] = useState(0)
+function AppInner(): React.ReactNode {
+  const { accounts, currentAccount, init } = useAppStore()
+  const [page, setPage] = useState('home')
   const [initialized, setInitialized] = useState(false)
 
   useEffect(() => {
@@ -68,75 +46,23 @@ export default function App(): React.ReactNode {
     return <AccountSetup />
   }
 
-  // 待决策角标：汇报事件与切页刷新
-  useEffect(() => {
-    if (!currentAccount) return
-    window.daydream.reports
-      .list(currentAccount.id)
-      .then((reports) => setPendingCount(reports.filter((r) => r.status === 'pending' && r.level === 'need_decision').length))
-      .catch(() => undefined)
-  }, [currentAccount, lastEvent, page])
-
   return (
-    <Layout style={{ height: '100vh' }}>
-      <Sider width={180} theme="dark">
-        <div style={{ padding: '16px 16px 8px', fontSize: 18, fontWeight: 700, color: '#fff' }}>
-          Daydream
-          <div style={{ fontSize: 11, fontWeight: 400, color: '#8c93a3' }}>AI 量化决策辅助</div>
-        </div>
-        <Menu
-          theme="dark"
-          mode="inline"
-          selectedKeys={[page]}
-          onClick={(e) => setPage(e.key)}
-          items={Object.entries(PAGES).map(([key, p]) => ({
-            key,
-            icon: p.icon,
-            label:
-              key === 'decisions' && pendingCount > 0 ? (
-                <span>
-                  {p.label} <Badge count={pendingCount} size="small" />
-                </span>
-              ) : (
-                p.label
-              )
-          }))}
-        />
-      </Sider>
-      <Layout>
-        <Header style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: '#14161b', padding: '0 16px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <Tag icon={<RobotOutlined />} color={agentActive ? 'success' : 'default'}>
-              Agent {agentActive ? '运行中' : '待命'}
-            </Tag>
-            {agentRunning ? (
-              <Button size="small" danger icon={<PauseCircleOutlined />} onClick={() => stopAgent().catch((e) => message.error((e as Error).message))}>
-                停止运行
-              </Button>
-            ) : (
-              <Button
-                size="small"
-                type="primary"
-                icon={<PlayCircleOutlined />}
-                onClick={() => startAgent().catch((e) => message.error((e as Error).message))}
-              >
-                开始运行
-              </Button>
-            )}
-            {lastEvent && <span style={{ color: '#8c93a3', fontSize: 12 }}>最近事件：{lastEvent.type}</span>}
-          </div>
-          <Select
-            size="small"
-            style={{ width: 180 }}
-            value={currentAccount?.id}
-            onChange={(id) => switchAccount(id)}
-            options={accounts.map((a) => ({ value: a.id, label: a.name }))}
-          />
-        </Header>
-        <Content style={{ padding: 16, overflow: 'auto' }}>{PAGES[page]?.node ?? <Dashboard />}</Content>
-      </Layout>
+    <div className="dd-app">
+      <AppHeader />
+      <div className="dd-body">
+        <NavSide page={page} onNavigate={setPage} />
+        <main className="dd-content">{PAGES[page]?.node ?? <Home />}</main>
+      </div>
       {/* 进入主界面后强制配置模型（全局通用） */}
       {initialized && currentAccount && <ModelConfigModal />}
-    </Layout>
+    </div>
+  )
+}
+
+export default function App(): React.ReactNode {
+  return (
+    <AppThemeProvider>
+      <AppInner />
+    </AppThemeProvider>
   )
 }

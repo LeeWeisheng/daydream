@@ -15,38 +15,64 @@ const api: DaydreamApi = {
     list: () => invoke(IPC.accountList),
     create: (req) => invoke(IPC.accountCreate, req),
     switchTo: (req) => invoke(IPC.accountSwitch, req),
+    rename: (req) => invoke(IPC.accountRename, req),
     remove: (accountId) => invoke(IPC.accountDelete, accountId)
   },
   settings: {
     get: (accountId) => invoke(IPC.settingsGet, accountId),
-    update: (accountId, patch) => invoke(IPC.settingsUpdate, accountId, patch)
+    update: (patch) => invoke(IPC.settingsUpdate, '', patch)
+  },
+  theme: {
+    get: () => invoke(IPC.themeGet),
+    set: (mode) => invoke(IPC.themeSet, mode)
+  },
+  runMode: {
+    get: () => invoke(IPC.runModeGet),
+    set: (mode) => invoke(IPC.runModeSet, mode)
+  },
+  window: {
+    minimize: () => invoke(IPC.windowMinimize),
+    toggleMaximize: () => invoke(IPC.windowToggleMaximize),
+    close: () => invoke(IPC.windowClose),
+    isMaximized: () => invoke(IPC.windowIsMaximized),
+    isFullScreen: () => invoke(IPC.windowIsFullScreen)
   },
   data: {
     getStockList: () => invoke(IPC.dataGetStockList),
     getQuote: (codes) => invoke(IPC.dataGetQuote, codes),
     getKline: (code, start, end) => invoke(IPC.dataGetKline, { code, start, end }),
+    getIndexDaily: (code, start, end) => invoke(IPC.dataGetIndexDaily, { code, start, end }),
     getDataStatus: () => invoke(IPC.dataGetDataStatus),
+    getDataStats: () => invoke(IPC.dataGetDataStats),
     initialSync: () => invoke(IPC.dataInitialSync),
-    dailyUpdate: () => invoke(IPC.dataDailyUpdate)
+    dailyUpdate: () => invoke(IPC.dataDailyUpdate),
+    upsertStock: (req) => invoke(IPC.dataUpsertStock, req),
+    deleteStock: (code) => invoke(IPC.dataDeleteStock, code),
+    upsertKline: (req) => invoke(IPC.dataUpsertKline, req),
+    deleteKline: (code, date) => invoke(IPC.dataDeleteKline, { code, date })
   },
-  strategies: {
-    list: (accountId) => invoke(IPC.strategyList, accountId),
-    get: (id) => invoke(IPC.strategyGet, id),
-    create: (req) => invoke(IPC.strategyCreate, req),
-    update: (id, dslJson, changeLog) => invoke(IPC.strategyUpdate, { id, dslJson, changeLog }),
-    activate: (id) => invoke(IPC.strategyActivate, { id }),
-    deactivate: (id) => invoke(IPC.strategyDeactivate, { id })
+  strategy: {
+    getForAccount: (accountId) => invoke(IPC.strategyGetForAccount, accountId),
+    save: (req) => invoke(IPC.strategySave, req),
+    getVersions: (strategyId) => invoke(IPC.strategyGetVersions, strategyId),
+    rollback: (accountId, versionId) => invoke(IPC.strategyRollback, { accountId, versionId }),
+    activate: (accountId) => invoke(IPC.strategyActivate, { accountId }),
+    deactivate: (accountId) => invoke(IPC.strategyDeactivate, { accountId }),
+    getLatestBacktest: (accountId) => invoke(IPC.strategyGetLatestBacktest, accountId)
   },
-  backtests: {
-    start: (req) => invoke(IPC.backtestStart, req),
-    cancel: (runId) => invoke(IPC.backtestCancel, runId),
-    list: (accountId) => invoke(IPC.backtestList, accountId),
-    getResult: (runId) => invoke(IPC.backtestGetResult, runId),
-    getTrades: (runId) => invoke(IPC.backtestGetTrades, runId)
+  trades: {
+    order: (req) => invoke(IPC.tradeOrder, req),
+    list: (accountId) => invoke(IPC.tradeList, accountId),
+    accountSummary: (accountId) => invoke(IPC.tradeAccountSummary, accountId),
+    setInitialCash: (accountId, cash) => invoke(IPC.tradeSetInitialCash, { accountId, cash })
   },
   signals: {
     list: (accountId, limit) => invoke(IPC.signalList, accountId, limit ?? 100),
     feedback: (req) => invoke(IPC.signalFeedback, req)
+  },
+  positions: {
+    list: (accountId) => invoke(IPC.positionList, accountId),
+    upsert: (req) => invoke(IPC.positionUpsert, req)
   },
   alerts: {
     list: (accountId) => invoke(IPC.alertList, accountId),
@@ -65,31 +91,12 @@ const api: DaydreamApi = {
     list: (accountId) => invoke(IPC.reportList, accountId),
     respond: (req) => invoke(IPC.reportRespond, req)
   },
-  perf: {
-    getSnapshot: (accountId) => invoke(IPC.perfGetSnapshot, accountId),
-    getCharts: (accountId) => invoke(IPC.perfGetCharts, accountId)
-  },
-  reviews: {
-    list: (accountId) => invoke(IPC.reviewList, accountId),
-    getReport: (id) => invoke(IPC.reviewGetReport, id)
-  },
-  positions: {
-    list: (accountId) => invoke(IPC.positionList, accountId),
-    upsert: (req) => invoke(IPC.positionUpsert, req)
-  },
-  trades: {
-    list: (accountId) => invoke(IPC.tradeList, accountId),
-    create: (req) => invoke(IPC.tradeCreate, req)
-  },
-  audit: {
-    list: (accountId, limit) => invoke(IPC.auditList, accountId, limit ?? 200),
-    events: (accountId, limit) => invoke(IPC.eventList, accountId, limit ?? 200)
-  },
   chat: {
-    send: (req) => invoke(IPC.chatSend, req)
+    send: (req) => invoke(IPC.chatSend, req),
+    list: (accountId, opts) => invoke(IPC.chatList, { accountId, ...opts })
   },
-  runs: {
-    list: (accountId) => invoke('runs:list', accountId)
+  events: {
+    list: (accountId, limit) => invoke(IPC.eventList, accountId, limit ?? 200)
   },
   onEvent: (cb: (ev: UiEvent) => void) => {
     const listener = (_e: Electron.IpcRendererEvent, ev: UiEvent): void => cb(ev)

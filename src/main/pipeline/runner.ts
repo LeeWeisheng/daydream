@@ -16,11 +16,11 @@ import { agentEventBus } from '../agent/events'
 import { persistSignal } from '../agent/tools'
 import { LOT_SIZE } from '@shared/constants'
 
-/** 运行决策：对全部 active 策略跑一遍信号评估（策略全局共享，信号/持仓按活跃账户隔离） */
+/** 运行决策：对活跃账户的运行中策略跑一遍信号评估（每账户唯一策略） */
 export async function runDailyDecision(accountId: string): Promise<{ signals: number }> {
   const strategies = queryAll<Strategy & Record<string, unknown>>(
-    "SELECT * FROM strategy WHERE status IN ('active', 'paused')",
-    []
+    "SELECT * FROM strategy WHERE account_id = ? AND status IN ('active', 'paused')",
+    [accountId]
   )
   let total = 0
   for (const strategy of strategies) {
@@ -35,7 +35,13 @@ export async function runDailyDecision(accountId: string): Promise<{ signals: nu
 }
 
 async function evaluateStrategy(accountId: string, strategy: Strategy & Record<string, unknown>): Promise<number> {
-  const { dsl } = parseAndValidateDsl(String(strategy.dsl_json ?? ''))
+  const dslJson = String(strategy.dsl_json ?? '')
+  // 无可执行 DSL（策略文档未含/已移除 ```dsl 块）→ 跳过确定性评估，仅文档态
+  if (!dslJson.trim()) {
+    logger.info(`[runner] strategy ${strategy.id} has no executable DSL block, skipped`)
+    return 0
+  }
+  const { dsl } = parseAndValidateDsl(dslJson)
   if (!dsl) throw new Error('策略 DSL 非法')
   // 运行实例（无则创建）
   let instance = queryAll<{ id: string; strategy_version_id: string }>(

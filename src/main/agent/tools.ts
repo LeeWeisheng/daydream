@@ -3,7 +3,8 @@
  * 受限操作：activate / deactivate / publish_signal 按自主级别与批准流程控制。
  */
 import type { Account, RiskCheckResult, Signal, Strategy } from '@shared/types'
-import { parseAndValidateDsl } from '@shared/strategy/schema'
+import { extractDslFromMarkdown } from '@shared/strategy/schema'
+import { DEFAULT_PREFERENCES } from '@shared/constants'
 import { getDb, nowIso, queryAll, run } from '../db'
 import { audit } from '../services/audit'
 import * as dataService from '../data/service'
@@ -12,6 +13,9 @@ import { computeSignalDeviation, computeSnapshotMetrics, computeTradeStats } fro
 import { agentEventBus } from './events'
 import { deepseekWebSearch } from './webSearch'
 import { dailyUpdate } from '../data/pipeline'
+import { addChatMessage, formatReportContent, listChatMessages } from '../chat'
+import { isAutoMode } from '../runMode'
+import { applyReportDecision } from '../reportDecision'
 import type { TradeRecord } from '@shared/types'
 
 // 工具共享上下文（当前账户）
@@ -31,7 +35,9 @@ function toAccountStrategy(row: Record<string, unknown>): Strategy {
     accountId: String(row.account_id),
     name: String(row.name),
     version: Number(row.version),
+    markdown: String(row.markdown ?? ''),
     dslJson: String(row.dsl_json),
+    preferencesJson: String(row.preferences_json ?? '{}'),
     status: row.status as Strategy['status'],
     createdBy: String(row.created_by),
     rationale: String(row.rationale),
@@ -40,27 +46,9 @@ function toAccountStrategy(row: Record<string, unknown>): Strategy {
   }
 }
 
-/** 创建策略（DSL 校验通过才落库） */
-export function createStrategyDirect(accountId: string, name: string, dslJson: string, rationale: string, createdBy: string): Strategy {
-  const { errors } = parseAndValidateDsl(dslJson)
-  if (errors.length > 0) {
-    throw new Error(`策略 DSL 校验失败: ${errors.join('; ')}`)
-  }
-  const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-  const now = nowIso()
-  run(
-    'INSERT INTO strategy (id, account_id, name, version, dsl_json, status, created_by, rationale, created_at, updated_at) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?)',
-    [id, accountId, name, dslJson, 'draft', createdBy, rationale, now, now]
-  )
-  run('INSERT INTO strategy_version (id, strategy_id, version, dsl_json, change_log, created_at) VALUES (?, ?, 1, ?, ?, ?)', [
-    `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    id,
-    dslJson,
-    '初始版本',
-    now
-  ])
-  audit({ accountId, actor: 'agent', action: 'strategy.create', target: id, detail: { name } })
-  return getStrategyDirect(id)!
+export function getStrategyForAccountDirect(accountId: string): Strategy | undefined {
+  const row = getDb().prepare('SELECT * FROM strategy WHERE account_id = ?').get(accountId) as Record<string, unknown> | undefined
+  return row ? toAccountStrategy(row) : undefined
 }
 
 export function getStrategyDirect(id: string): Strategy | undefined {
@@ -68,12 +56,56 @@ export function getStrategyDirect(id: string): Strategy | undefined {
   return row ? toAccountStrategy(row) : undefined
 }
 
-function listStrategiesDirect(_accountId: string): Strategy[] {
-  // 策略全局共享（所有账户共用同一策略库；资金/持仓隔离由信号与持仓表承担）
-  const rows = getDb()
-    .prepare('SELECT * FROM strategy ORDER BY created_at DESC LIMIT 100')
-    .all() as Record<string, unknown>[]
-  return rows.map(toAccountStrategy)
+/** 账户唯一策略的 Markdown 保存：首次创建 / 迭代新版本（不改用户偏好）；```dsl 块自动同步执行层 */
+export function saveStrategyMarkdownForAccount(accountId: string, name: string, markdown: string, rationale: string, createdBy: string): Strategy {
+  const extracted = extractDslFromMarkdown(markdown)
+  if (extracted.errors.length > 0) {
+    throw new Error(`策略 Markdown 校验失败: ${extracted.errors.join('; ')}`)
+  }
+  const dslJson = extracted.dsl ? JSON.stringify(extracted.dsl, null, 2) : ''
+  const now = nowIso()
+  const existing = getStrategyForAccountDirect(accountId)
+  if (!existing) {
+    // 首次创建：账户唯一策略（默认偏好，后续仅用户可改）
+    const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    run(
+      'INSERT INTO strategy (id, account_id, name, version, dsl_json, markdown, preferences_json, status, created_by, rationale, created_at, updated_at) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [id, accountId, name, dslJson, markdown, JSON.stringify(DEFAULT_PREFERENCES), 'draft', createdBy, rationale, now, now]
+    )
+    run('INSERT INTO strategy_version (id, strategy_id, version, dsl_json, markdown, change_log, created_at) VALUES (?, ?, 1, ?, ?, ?, ?)', [
+      `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      id,
+      dslJson,
+      markdown,
+      '初始版本',
+      now
+    ])
+    audit({ accountId, actor: createdBy, action: 'strategy.create', target: id, detail: { name } })
+    return getStrategyDirect(id)!
+  }
+  // 迭代：新版本留档
+  const newVersion = existing.version + 1
+  run('UPDATE strategy SET dsl_json = ?, markdown = ?, version = ?, name = ?, rationale = ?, updated_at = ? WHERE id = ?', [
+    dslJson,
+    markdown,
+    newVersion,
+    name || existing.name,
+    rationale || existing.rationale,
+    now,
+    existing.id
+  ])
+  run('INSERT INTO strategy_version (id, strategy_id, version, dsl_json, markdown, change_log, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)', [
+    `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    existing.id,
+    newVersion,
+    dslJson,
+    markdown,
+    `${createdBy === 'agent' ? 'Agent 迭代' : '用户修改'}`,
+    now
+  ])
+  audit({ accountId, actor: createdBy, action: 'strategy.update', target: existing.id, detail: { version: newVersion } })
+  agentEventBus.emitAgentEvent('strategy.updated', accountId, { strategyId: existing.id, version: newVersion }, { debounceMs: 0 })
+  return getStrategyDirect(existing.id)!
 }
 
 function getAccountSummary(accountId: string): Record<string, unknown> {
@@ -85,16 +117,14 @@ function getAccountSummary(accountId: string): Record<string, unknown> {
     const row = getDb().prepare('SELECT price FROM market_quote WHERE code = ?').get(p.code) as { price: number } | undefined
     return sum + p.qty * (row?.price ?? p.cost_price)
   }, 0)
-  const snap = queryAll<{ total_assets: number; cash: number }>(
-    'SELECT total_assets, cash FROM account_snapshot WHERE account_id = ? ORDER BY date DESC LIMIT 1',
-    [accountId]
-  )[0]
+  const acc = queryAll<{ cash: number }>('SELECT cash FROM account WHERE id = ?', [accountId])[0]
+  const cash = acc?.cash ?? 0
   return {
     accountId,
     positionCount: positions.length,
     marketValue,
-    totalAssets: snap?.total_assets ?? marketValue,
-    cash: snap?.cash ?? 0,
+    totalAssets: cash + marketValue,
+    cash,
     positions
   }
 }
@@ -178,46 +208,56 @@ export async function executeToolCall(accountId: string, toolName: string, args:
       return deepseekWebSearch(account, arg('query'))
 
     case 'create_strategy': {
-      const s = createStrategyDirect(account, arg('name'), arg('dslJson'), arg('rationale'), 'agent')
+      const existing = getStrategyForAccountDirect(account)
+      if (existing) throw new Error('账户已有唯一策略，请使用 update_strategy 迭代')
+      // Agent 创建的策略必须含可执行 ```dsl 块（闭环完整性：生成 → 回测 → 运行）
+      const md = arg('markdown')
+      const extracted = extractDslFromMarkdown(md)
+      if (extracted.errors.length > 0) throw new Error(`策略 Markdown 校验失败: ${extracted.errors.join('; ')}`)
+      if (!extracted.dsl) throw new Error('策略 Markdown 缺少可执行的 ```dsl 代码块')
+      const s = saveStrategyMarkdownForAccount(account, arg('name'), md, arg('rationale'), 'agent')
       return { id: s.id, name: s.name, status: s.status }
     }
 
     case 'update_strategy': {
-      const strategyId = arg('strategyId')
-      const dslJson = arg('dslJson')
-      const { errors } = parseAndValidateDsl(dslJson)
-      if (errors.length > 0) throw new Error(`DSL 校验失败: ${errors.join('; ')}`)
-      const existing = getStrategyDirect(strategyId)
-      if (!existing) throw new Error('策略不存在')
-      const newVersion = existing.version + 1
-      const now = nowIso()
-      run('UPDATE strategy SET dsl_json = ?, version = ?, updated_at = ? WHERE id = ?', [dslJson, newVersion, now, strategyId])
-      run('INSERT INTO strategy_version (id, strategy_id, version, dsl_json, change_log, created_at) VALUES (?, ?, ?, ?, ?, ?)', [
-        `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        strategyId,
-        newVersion,
-        dslJson,
-        arg('changeLog', 'Agent 更新'),
-        now
-      ])
-      audit({ accountId: account, actor: 'agent', action: 'strategy.update', target: strategyId })
-      return { strategyId, version: newVersion }
+      // 迭代账户唯一策略 Markdown（不修改用户偏好）；无 ```dsl 块时执行层清空（文档态）
+      const md = arg('markdown')
+      const extracted = extractDslFromMarkdown(md)
+      if (extracted.errors.length > 0) throw new Error(`策略 Markdown 校验失败: ${extracted.errors.join('; ')}`)
+      const s = saveStrategyMarkdownForAccount(account, arg('name'), md, arg('rationale'), 'agent')
+      return { strategyId: s.id, version: s.version, executable: Boolean(extracted.dsl) }
     }
 
     case 'list_strategies':
-      return listStrategiesDirect(account)
-
-    case 'get_strategy':
-      return getStrategyDirect(arg('strategyId'))
+    case 'get_strategy': {
+      const s = getStrategyForAccountDirect(account)
+      return s ? { id: s.id, name: s.name, version: s.version, status: s.status, markdown: s.markdown, dslJson: s.dslJson, preferencesJson: s.preferencesJson, rationale: s.rationale } : null
+    }
 
     case 'activate_strategy': {
-      audit({ accountId: account, actor: 'agent', action: 'strategy.activate.request', target: arg('strategyId') })
-      return { requested: true, strategyId: arg('strategyId'), note: '已提交上线评审，需人工批准' }
+      // 自动模式（策略验证）：直接激活，无需人工批准
+      const strategyId = arg('strategyId')
+      if (isAutoMode()) {
+        run('UPDATE strategy SET status = ?, updated_at = ? WHERE id = ?', ['active', nowIso(), strategyId])
+        agentEventBus.emitAgentEvent('strategy.activated', account, { strategyId }, { debounceMs: 0 })
+        audit({ accountId: account, actor: 'auto', action: 'strategy.activate.auto', target: strategyId })
+        return { activated: true, strategyId, note: '自动模式：已直接激活' }
+      }
+      audit({ accountId: account, actor: 'agent', action: 'strategy.activate.request', target: strategyId })
+      return { requested: true, strategyId, note: '已提交上线评审，需人工批准' }
     }
 
     case 'deactivate_strategy': {
-      audit({ accountId: account, actor: 'agent', action: 'strategy.deactivate.request', target: arg('strategyId'), detail: { reason: arg('reason') } })
-      return { requested: true, strategyId: arg('strategyId'), note: '已提交停用评审，需人工确认' }
+      // 自动模式（策略验证）：直接停用，无需人工确认
+      const strategyId = arg('strategyId')
+      if (isAutoMode()) {
+        run("UPDATE strategy SET status = 'deactivated', updated_at = ? WHERE id = ?", [nowIso(), strategyId])
+        run("UPDATE run_instance SET status = 'stopped', stopped_at = ? WHERE strategy_id = ? AND status = 'active'", [nowIso(), strategyId])
+        audit({ accountId: account, actor: 'auto', action: 'strategy.deactivate.auto', target: strategyId, detail: { reason: arg('reason') } })
+        return { deactivated: true, strategyId, note: '自动模式：已直接停用' }
+      }
+      audit({ accountId: account, actor: 'agent', action: 'strategy.deactivate.request', target: strategyId, detail: { reason: arg('reason') } })
+      return { requested: true, strategyId, note: '已提交停用评审，需人工确认' }
     }
 
     case 'run_backtest': {
@@ -406,20 +446,41 @@ export async function executeToolCall(accountId: string, toolName: string, args:
       const level = (args.level as 'result' | 'summary' | 'need_decision') ?? 'result'
       const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
       const now = nowIso()
+      const title = arg('title')
+      const summary = arg('summary')
+      const decisionJson = args.decisionJson ?? null
+      // 自动模式（策略验证）：need_decision 汇报自动批准并执行，无需人工干预
+      const autoApproved = level === 'need_decision' && isAutoMode()
       run('INSERT INTO report (id, account_id, level, title, summary, decision_json, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', [
         id,
         account,
         level,
-        arg('title'),
-        arg('summary'),
-        args.decisionJson ?? null,
-        'pending',
+        title,
+        summary,
+        decisionJson,
+        autoApproved ? 'approved' : 'pending',
         now,
         now
       ])
-      agentEventBus.emitAgentEvent('agent.report', account, { reportId: id, level, title: arg('title') }, { debounceMs: 0 })
-      return { reportId: id }
+      // 汇报同步进入首页对话流
+      addChatMessage({
+        accountId: account,
+        role: 'assistant',
+        kind: 'report',
+        content: autoApproved ? `${formatReportContent(title, summary, level)}\n（自动模式：已自动批准并执行）` : formatReportContent(title, summary, level),
+        reportId: id,
+        reportLevel: level,
+        reportStatus: autoApproved ? 'approved' : 'pending'
+      })
+      if (autoApproved && decisionJson) {
+        applyReportDecision({ reportId: id, accountId: account, decisionJson: String(decisionJson), decision: 'approved', actor: 'auto', note: '自动模式自动批准' })
+      }
+      agentEventBus.emitAgentEvent('agent.report', account, { reportId: id, level, title, autoApproved }, { debounceMs: 0 })
+      return { reportId: id, autoApproved }
     }
+
+    case 'get_chat_history':
+      return listChatMessages(account, { limit: num('limit', 30) }).messages.map((m) => ({ role: m.role, content: m.content, createdAt: m.createdAt }))
 
     case 'finish_workitem':
       return { done: true, summary: arg('summary') }

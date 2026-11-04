@@ -68,7 +68,12 @@ export interface Strategy {
   accountId: string
   name: string
   version: number
+  /** 策略文档（Markdown 主载体，可含 ```dsl 代码块作为可执行部分；用户与 Agent 均可改） */
+  markdown: string
+  /** 可执行 DSL（由 markdown 的 ```dsl 块提取同步，供确定性执行引擎消费；无块时为空串） */
   dslJson: string
+  /** 用户偏好（每账户唯一策略 = 策略文档 + 用户偏好）；仅用户可改 */
+  preferencesJson: string
   status: StrategyStatus
   createdBy: string
   rationale: string
@@ -76,10 +81,41 @@ export interface Strategy {
   updatedAt: string
 }
 
+// ---------- 用户偏好（策略的一部分） ----------
+export type RiskTolerance = 'conservative' | 'moderate' | 'aggressive'
+export type InvestmentStyle = 'value' | 'growth' | 'trend' | 'blend'
+export type HoldingPeriod = 'short' | 'swing' | 'long'
+export type TradeFrequency = 'low' | 'medium' | 'high'
+
+export interface NotifyPrefs {
+  signals: boolean
+  alerts: boolean
+  summaries: boolean
+  quietHours: string
+}
+
+export interface StrategyPreferences {
+  riskTolerance: RiskTolerance
+  investmentStyle: InvestmentStyle
+  expectedAnnualReturn: number
+  maxDrawdownTolerance: number
+  holdingPeriod: HoldingPeriod
+  preferredIndustries: string[]
+  excludedIndustries: string[]
+  maxPositions: number
+  maxPositionPct: number
+  maxTotalPositionPct: number
+  tradeFrequency: TradeFrequency
+  autonomyLevel: AutonomyLevel
+  notify: NotifyPrefs
+}
+
 export interface StrategyVersion {
   id: string
   strategyId: string
   version: number
+  /** 该版本的策略文档（Markdown） */
+  markdown: string
   dslJson: string
   changeLog: string
   createdAt: string
@@ -353,7 +389,87 @@ export interface BacktestResult {
   sampleMetrics?: BacktestMetrics // 样本外分段指标（若指定）
 }
 
-// ---------- 模型配置 ----------
+// ---------- 对话流 ----------
+export type ChatMessageKind =
+  | 'text' // 用户消息 / 旧版 assistant 文本
+  | 'assistant_text' // 中间 assistant 文本（运行细节，折叠）
+  | 'thinking' // 思考块（运行细节，折叠）
+  | 'tool_use' // 工具调用（运行细节，折叠）
+  | 'tool_result' // 工具结果（运行细节，折叠）
+  | 'tool_progress' // 工具进度（运行细节，折叠）
+  | 'tool_use_summary' // 工具批处理摘要（运行细节，折叠）
+  | 'system' // 系统消息（运行细节，折叠）
+  | 'result' // 主要结果（Agent 最终输出/工作项完成）
+  | 'error' // 错误结果
+  | 'report' // Agent 汇报（含待决策按钮）
+
+export interface ChatMessage {
+  id: string
+  accountId: string
+  role: 'user' | 'assistant'
+  content: string
+  kind: ChatMessageKind
+  /** 行号（rowid，分页游标） */
+  rowid: number
+  /** 元数据：工具名/入参/耗时等（Claude 消息块适配） */
+  metaJson?: string
+  /** 关联工作项（运行细节按工作项分组折叠） */
+  workItemId?: string
+  /** 关联会话（Claude SDK session_id） */
+  sessionId?: string
+  /** 关联汇报（Agent 汇报型消息） */
+  reportId?: string
+  /** 关联汇报级别（渲染决策按钮） */
+  reportLevel?: ReportLevel
+  /** 关联汇报状态（decision 响应后同步） */
+  reportStatus?: string
+  createdAt: string
+}
+
+// ---------- 资金与账户概览 ----------
+export interface PositionDetail {
+  code: string
+  name: string
+  qty: number
+  costPrice: number
+  price: number
+  marketValue: number
+  pnl: number
+  pnlPct: number
+  positionPct: number
+}
+
+export interface AccountSummary {
+  accountId: string
+  cash: number
+  initialCash: number
+  marketValue: number
+  totalAssets: number
+  positionPnl: number
+  totalPnl: number
+  todayPnl: number
+  positionPct: number
+  positionCount: number
+  positions: PositionDetail[]
+  equityCurve: { date: string; totalAssets: number }[]
+}
+
+// ---------- 主题 ----------
+export type ThemeMode = 'light' | 'dark' | 'system'
+
+// ---------- 运行模式 ----------
+export type RunMode = 'manual' | 'auto'
+
+// ---------- 模型预设 ----------
+export interface ModelPreset {
+  id: string
+  name: string
+  baseUrl: string
+  model: string
+  modelPro: string
+  contextWindow: number
+  maxCallsPerHour: number
+}
 export interface ModelConfig {
   baseUrl: string
   apiKey: string
@@ -375,6 +491,7 @@ export type UiEventType =
   | 'backtest.finished'
   | 'strategy.updated'
   | 'agent.status'
+  | 'chat.message'
 
 export interface UiEvent {
   type: UiEventType | string

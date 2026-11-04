@@ -9,6 +9,7 @@ import { join } from 'node:path'
 import { logger } from '../services/logger'
 import { executeToolCall } from './tools'
 import { getModelConfig } from './modelConfig'
+import { recordSdkMessage } from './messageSink'
 
 interface PendingRequest {
   resolve: (msg: { ok: boolean; data?: unknown; error?: string }) => void
@@ -82,6 +83,16 @@ export async function ensureBridge(accountId: string): Promise<void> {
         )
         return
       }
+      if (msg.method === 'agentMessage' && msg.params) {
+        // bridge 转发的 Claude 消息流 → 记录到首页对话流（运行细节折叠）
+        recordSdkMessage(
+          String(msg.params.accountId ?? ''),
+          msg.params.workItemId ? String(msg.params.workItemId) : undefined,
+          String(msg.params.purpose ?? ''),
+          msg.params.msg as Record<string, unknown>
+        )
+        return
+      }
       if (msg.id) {
         const p = pending.get(msg.id)
         if (p) {
@@ -151,6 +162,8 @@ export interface BridgeStructuredParams {
   jsonSchema: Record<string, unknown>
   purpose: string
   useProModel?: boolean
+  /** 关联工作项（消息流分组） */
+  workItemId?: string
 }
 
 export interface BridgeAgentTurnParams {
@@ -160,15 +173,20 @@ export interface BridgeAgentTurnParams {
   purpose: string
   maxSteps?: number
   useProModel?: boolean
+  /** 关联工作项（消息流分组） */
+  workItemId?: string
 }
 
 /** 结构化输出（经桥接） */
 export async function bridgeStructuredOutput(params: BridgeStructuredParams): Promise<{ structuredOutput?: unknown; result: string; modelUsage?: unknown }> {
   await ensureBridge(params.accountId)
   const resp = await request('structuredOutput', {
+    accountId: params.accountId,
     system: params.system,
     prompt: params.prompt,
     jsonSchema: params.jsonSchema,
+    purpose: params.purpose,
+    workItemId: params.workItemId ?? null,
     useProModel: Boolean(params.useProModel)
   })
   if (!resp.ok) throw new Error(String(resp.error ?? '桥接结构化输出失败'))
@@ -179,8 +197,11 @@ export async function bridgeStructuredOutput(params: BridgeStructuredParams): Pr
 export async function bridgeAgentTurn(params: BridgeAgentTurnParams): Promise<{ result: string; modelUsage?: unknown }> {
   await ensureBridge(params.accountId)
   const resp = await request('agentTurn', {
+    accountId: params.accountId,
     system: params.system,
     prompt: params.prompt,
+    purpose: params.purpose,
+    workItemId: params.workItemId ?? null,
     maxSteps: params.maxSteps ?? 12,
     useProModel: Boolean(params.useProModel)
   })

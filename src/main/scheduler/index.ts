@@ -49,10 +49,10 @@ export function startScheduler(): void {
       if (running && shouldFire('plan_weekly', SCHEDULE.planWeeklyTime, now, () => weekday === 5)) {
         agentEventBus.emitAgentEvent('schedule.plan_weekly', account.id, { date }, { debounceMs: 0 })
       }
-      // 盘中盯盘
+      // 盘中盯盘：定时任务直跑确定性规则检查（不经 LLM 评估，节省 token；规则由 Agent 预先配置）
       if (running && isMarketOpenNow() && Date.now() - lastMonitorTick > SCHEDULE.monitorIntervalMinutes * 60_000) {
         lastMonitorTick = Date.now()
-        agentEventBus.emitAgentEvent('schedule.monitor_tick', account.id, { date }, { debounceMs: 0 })
+        pipelines.monitorPipeline.run(account.id).catch((e) => logger.error(`[scheduler] monitor failed: ${(e as Error).message}`))
       }
       // 收盘后运行决策（15:05，用收盘实时快照）
       if (running && shouldFire('runner', SCHEDULE.runnerTime, now)) {

@@ -10,10 +10,11 @@ import { audit, auditDecision } from '../services/audit'
 import { logger } from '../services/logger'
 import { agentEventBus, type AgentEvent, recentEvents } from './events'
 import { createWorkItem, getWorkItem, incrementAttempts, nextRunnableWorkItem, parseContext, updateWorkItemStatus } from './workitem'
-import { structuredOutput, runAgentTurn } from './llm'
+import { structuredOutput, runAgentTurn, llmTraceContext } from './llm'
 import { EVALUATION_PROMPT, SYSTEM_IDENTITY } from './prompts'
 import { isModelConfigured } from './llm'
 import * as pipelines from '../pipeline'
+import { addChatMessage } from '../chat'
 
 // ---------- 运行时状态 ----------
 const state = {
@@ -40,6 +41,13 @@ export function isAgentRunning(): boolean {
   return state.running
 }
 
+/** 应用退出时优雅停止运行（不修改持久化开关：用户未点击停止，重启后恢复上次状态） */
+export function stopAgentRuntime(): void {
+  state.active = false
+  state.processing = false
+  logger.info('[agent] runtime stopped gracefully (app quitting)')
+}
+
 export function setAgentRunning(running: boolean): void {
   if (state.running === running) return
   state.running = running
@@ -57,9 +65,19 @@ export function getAgentStatus(): { active: boolean; running: boolean; lastTickA
 }
 
 /** 用户主动触发的事件（不受运行开关限制） */
-const USER_EVENTS = new Set(['user.message', 'user_request', 'chat.message'])
+const USER_EVENTS = new Set(['user.message', 'user_request'])
 function isUserEvent(type: string): boolean {
   return USER_EVENTS.has(type)
+}
+
+/**
+ * 仅 UI/审计的事件（不进入 LLM 评估，节省 token）：
+ * - alert.triggered：盯盘预警由定时任务确定性产出（规则预先配置），无需评估；
+ * - chat.message：对话流消息（Agent 输出/工具调用等）只推送 UI，不反馈给模型。
+ */
+const UI_ONLY_EVENTS = new Set(['alert.triggered', 'chat.message'])
+function isUiOnlyEvent(type: string): boolean {
+  return UI_ONLY_EVENTS.has(type)
 }
 
 // ---------- 评估 Schema ----------
@@ -99,6 +117,11 @@ function buildContextSummary(accountId: string): Record<string, unknown> {
 
 // ---------- 事件处理（评估 → 决策） ----------
 export async function handleAgentEvent(event: AgentEvent): Promise<void> {
+  // 仅 UI 的事件：不评估、不决策（如盯盘预警——规则已预先配置，定时任务确定性产出）
+  if (isUiOnlyEvent(event.type)) {
+    logger.debug(`[agent] ui-only event, no evaluation: ${event.type}`)
+    return
+  }
   // 运行开关：停止运行时，自动事件一律忽略（用户主动事件除外）
   if (!state.running && !isUserEvent(event.type)) {
     logger.debug(`[agent] not running, skip event ${event.type}`)
@@ -159,15 +182,13 @@ export async function handleAgentEvent(event: AgentEvent): Promise<void> {
   }
 }
 
-function fallbackForEvent(eventType: string): 'no_action' | 'retry_later' | 'predefined' {
+function fallbackForEvent(eventType: string): 'no_action' | 'retry_later' {
   switch (eventType) {
     case 'schedule.plan':
     case 'schedule.plan_weekly':
     case 'schedule.review_daily':
     case 'schedule.review_weekly':
       return 'retry_later'
-    case 'schedule.monitor_tick':
-      return 'predefined' // 盯盘事件降级：直接执行预置检查
     default:
       return 'no_action'
   }
@@ -224,6 +245,20 @@ export async function tickWorkItems(): Promise<void> {
 // ---------- 工作项执行 ----------
 const WORKITEM_TIMEOUT_MS = 30 * 60_000
 
+/** 工作项类型中文标签（对话流完成消息） */
+const WORKITEM_LABELS: Record<string, string> = {
+  plan: '规划',
+  generate_strategy: '生成策略',
+  backtest: '回测',
+  activate: '上线评审',
+  monitor_review: '盯盘检查',
+  review_daily: '日复盘',
+  review_weekly: '周复盘',
+  correct: '纠正',
+  data_backfill: '数据补数',
+  user_request: '用户请求'
+}
+
 export async function executeWorkItem(item: WorkItem): Promise<void> {
   updateWorkItemStatus(item.id, 'running')
   incrementAttempts(item.id)
@@ -234,9 +269,23 @@ export async function executeWorkItem(item: WorkItem): Promise<void> {
   try {
     const context = parseContext(item.contextJson)
     logger.info(`[agent] executing workitem ${item.id} (${item.type})`)
-    const result = await dispatchWorkItem(item, context)
+    // 注入 LLM 追踪上下文：工作项内全部模型消息（含工具调用/思考）挂到本工作项分组
+    const result = await llmTraceContext.run({ workItemId: item.id, sessionId: item.sessionId }, () => dispatchWorkItem(item, context))
     clearTimeout(timeout)
     updateWorkItemStatus(item.id, 'succeeded', { resultJson: JSON.stringify(result ?? {}) })
+    // 工作项完成 → 主要结果进首页对话流（user_request 的结果已由消息流记录，不重复）
+    if (item.type !== 'user_request') {
+      const label = WORKITEM_LABELS[item.type] ?? item.type
+      addChatMessage({
+        accountId: item.accountId,
+        role: 'assistant',
+        kind: 'result',
+        content: `${label}完成`,
+        metaJson: JSON.stringify({ workItemType: item.type, result: summarizeResult(result) }),
+        workItemId: item.id,
+        sessionId: item.sessionId
+      })
+    }
     agentEventBus.emitAgentEvent('workitem.completed', item.accountId, { workItemId: item.id, type: item.type, result: result ?? {} }, { debounceMs: 0 })
     audit({ accountId: item.accountId, actor: 'agent', action: 'workitem.succeeded', target: item.id, detail: { type: item.type } })
   } catch (e) {
@@ -245,12 +294,33 @@ export async function executeWorkItem(item: WorkItem): Promise<void> {
     logger.warn(`[agent] workitem ${item.id} failed (attempt ${item.attempts}/${item.maxAttempts}): ${err.message}`)
     if (item.attempts >= item.maxAttempts) {
       updateWorkItemStatus(item.id, 'failed', { error: err.message })
+      // 失败结果进首页对话流
+      const label = WORKITEM_LABELS[item.type] ?? item.type
+      addChatMessage({
+        accountId: item.accountId,
+        role: 'assistant',
+        kind: 'error',
+        content: `${label}失败：${err.message}`,
+        metaJson: JSON.stringify({ workItemType: item.type }),
+        workItemId: item.id,
+        sessionId: item.sessionId
+      })
       agentEventBus.emitAgentEvent('workitem.failed', item.accountId, { workItemId: item.id, type: item.type, error: err.message }, { debounceMs: 0 })
       audit({ accountId: item.accountId, actor: 'agent', action: 'workitem.failed', target: item.id, detail: { type: item.type, error: err.message } })
     } else {
       // 重试（重置 pending，稍后重新调度）
       updateWorkItemStatus(item.id, 'pending', { error: err.message })
     }
+  }
+}
+
+/** 结果摘要（对话流 meta，截断防爆） */
+function summarizeResult(result: unknown): unknown {
+  try {
+    const text = typeof result === 'string' ? result : JSON.stringify(result ?? {})
+    return text.length > 800 ? `${text.slice(0, 800)}…（截断）` : text
+  } catch {
+    return undefined
   }
 }
 
@@ -276,7 +346,8 @@ async function dispatchWorkItem(item: WorkItem, context: Record<string, unknown>
     case 'data_backfill':
       return pipelines.dataOps.backfillFromContext(item.accountId, context)
     case 'user_request': {
-      // 用户请求：以 Agent 会话执行（业务工具经 SDK MCP server 可用）
+      // 用户请求：以 Agent 会话执行（业务工具经 SDK MCP server 可用）；
+      // 会话全部消息（工具调用/思考/结果）经消息流进入首页对话流，此处只返回结果
       const message = String(context.message ?? '')
       if (!message) return { skipped: true }
       const text = await runAgentTurn(item.accountId, {
@@ -284,7 +355,7 @@ async function dispatchWorkItem(item: WorkItem, context: Record<string, unknown>
         prompt: message,
         purpose: 'user_request'
       })
-      return { reply: text }
+      return { reply: typeof text === 'string' && text.trim() ? text.trim() : '（任务已完成）' }
     }
     default:
       throw new Error(`未知工作项类型: ${item.type}`)

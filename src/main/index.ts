@@ -4,18 +4,20 @@
  * 渲染进程仅展示与交互（contextIsolation + sandbox + 白名单 IPC）。
  */
 import { app, BrowserWindow, shell } from 'electron'
+import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { initLogger, logger } from './services/logger'
 import { initCrypto, encryptString } from './services/crypto'
 import { openDatabase, ensureAccount, getDb } from './db'
 import { registerIpcHandlers, collectAccountSnapshot } from './ipc/handlers'
 import { startScheduler } from './scheduler'
-import { startAgentLoop, initAgentRunning } from './agent/loop'
+import { startAgentLoop, initAgentRunning, isAgentRunning, stopAgentRuntime } from './agent/loop'
 import { recoverRunningWorkItems } from './agent/workitem'
 import { audit } from './services/audit'
 import { getDataStats } from './data/service'
 import { runAgentSelfTest } from './agentSelfTest'
 import { runCryptoDiagnostic, runSpawnDiagnostic } from './cryptoDiag'
+import { initTheme } from './theme'
 
 /**
  * 配置种子：DAYDREAM_SEED_MODEL=1 时写入模型配置后退出（CLI/CI 用）。
@@ -57,6 +59,10 @@ async function seedModelConfigIfRequested(): Promise<boolean> {
 let mainWindow: BrowserWindow | null = null
 
 function createWindow(): void {
+  // 自绘标题栏：macOS 交通灯悬浮 header 左上角（hiddenInset）；Windows 无边框 + header 自绘窗口控制按钮
+  // 开发模式下使用本地图标（打包产物由 electron-builder 嵌入 exe / app bundle，无需此处处理）
+  const devIcon = join(app.getAppPath(), 'resources', 'icon.png')
+  const hasDevIcon = existsSync(devIcon)
   mainWindow = new BrowserWindow({
     width: 1440,
     height: 900,
@@ -65,6 +71,10 @@ function createWindow(): void {
     show: false,
     title: 'Daydream',
     backgroundColor: '#0f1115',
+    icon: hasDevIcon && process.platform !== 'darwin' ? devIcon : undefined,
+    titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
+    frame: process.platform !== 'darwin',
+    trafficLightPosition: { x: 16, y: 16 },
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
@@ -72,6 +82,18 @@ function createWindow(): void {
       nodeIntegration: false
     }
   })
+
+  // Windows：最大化/还原状态变化通知渲染端（同步自绘按钮图标）
+  mainWindow.on('maximize', () => mainWindow?.webContents.send('daydream:event', { type: 'window.maximized', payload: { maximized: true } }))
+  mainWindow.on('unmaximize', () => mainWindow?.webContents.send('daydream:event', { type: 'window.maximized', payload: { maximized: false } }))
+  // 全屏状态：macOS 全屏时交通灯自动隐藏（header 无需留白）；Windows 全屏时隐藏自绘窗口控制
+  mainWindow.on('enter-full-screen', () => mainWindow?.webContents.send('daydream:event', { type: 'window.fullscreen', payload: { fullscreen: true } }))
+  mainWindow.on('leave-full-screen', () => mainWindow?.webContents.send('daydream:event', { type: 'window.fullscreen', payload: { fullscreen: false } }))
+
+  // 开发模式：macOS Dock 显示本地图标
+  if (process.platform === 'darwin' && hasDevIcon) {
+    app.dock.setIcon(devIcon)
+  }
 
   mainWindow.on('ready-to-show', () => mainWindow?.show())
   mainWindow.webContents.setWindowOpenHandler((details) => {
@@ -89,6 +111,17 @@ function createWindow(): void {
 app.whenReady().then(async () => {
   initLogger()
   logger.info('[app] starting Daydream…')
+
+  // macOS 应用菜单「关于 Daydream」面板信息
+  if (process.platform === 'darwin') {
+    app.setAboutPanelOptions({
+      applicationName: 'Daydream',
+      applicationVersion: app.getVersion(),
+      version: `v${app.getVersion()}`,
+      copyright: 'Copyright © 2026 Daydream Team',
+      credits: 'A 股 AI 量化决策辅助：行情数据、策略回测、风控与 AI Agent 决策闭环自动化，交易由人工执行'
+    })
+  }
 
   // 密钥重置（CLI 模式）：必须在 initCrypto 之前删除 .masterkey，否则新配置将不可解密
   if (process.env.DAYDREAM_RESET_CRYPTO === '1') {
@@ -112,6 +145,7 @@ app.whenReady().then(async () => {
   logger.info(`[app] recovered ${recovered.length} running workitems`)
 
   registerIpcHandlers()
+  initTheme()
   startAgentLoop()
   initAgentRunning()
   startScheduler()
@@ -145,12 +179,20 @@ app.whenReady().then(async () => {
 })
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
-    app.quit()
-  }
+  // 单窗口应用：关闭窗口即退出（Agent 不后台残留；macOS 亦同）
+  app.quit()
 })
 
+let quitting = false
 app.on('before-quit', () => {
+  if (quitting) return
+  quitting = true
+  // 关闭软件时优雅停止 Agent 运行（不修改持久化开关：用户并未点击停止，重启后恢复）
   const account = ensureAccount()
+  const running = isAgentRunning()
+  if (running) {
+    stopAgentRuntime()
+    audit({ accountId: account?.id ?? 'global', actor: 'system', action: 'agent.stop_on_quit' })
+  }
   if (account) audit({ accountId: account.id, actor: 'system', action: 'app.quit' })
 })

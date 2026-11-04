@@ -1,15 +1,30 @@
 /**
  * 模型配置模态框：进入主界面后强制配置模型（全局通用，所有账户共用）。
  * 未配置时不可关闭（closable=false, maskClosable=false）。
+ * 内置服务商预设：选择后 baseURL / 模型名 / 上下文等自动填充，仅需填 API Key。
  */
 import { useEffect, useState } from 'react'
-import { Modal, Form, Input, Alert, message } from 'antd'
-import type { ModelConfig } from '@shared/types'
+import { Modal, Form, Input, Select, Alert, message } from 'antd'
+import { useAntdToken } from 'antd-style'
+import type { ModelConfig, ModelPreset } from '@shared/types'
+
+interface FormValues {
+  baseUrl: string
+  apiKey: string
+  model: string
+  modelPro?: string
+  contextWindow: number
+  maxCallsPerHour: number
+}
 
 export default function ModelConfigModal(): React.ReactNode {
+  const token = useAntdToken()
   const [open, setOpen] = useState(false)
   const [modelConfigured, setModelConfigured] = useState(true)
-  const [form] = Form.useForm<ModelConfig>()
+  const [presets, setPresets] = useState<ModelPreset[]>([])
+  const [presetId, setPresetId] = useState<string>()
+  const [custom, setCustom] = useState(false)
+  const [form] = Form.useForm<FormValues>()
   const [submitting, setSubmitting] = useState(false)
 
   useEffect(() => {
@@ -17,23 +32,59 @@ export default function ModelConfigModal(): React.ReactNode {
       window.daydream.settings
         .get('global')
         .then((s) => {
+          setPresets(s.presets)
           setModelConfigured(s.modelConfigured)
           if (!s.modelConfigured) {
             setOpen(true)
-            if (s.modelConfig) form.setFieldsValue(s.modelConfig)
+            const cfg = s.modelConfig
+            form.setFieldsValue({
+              baseUrl: cfg?.baseUrl ?? s.presets[0]?.baseUrl ?? '',
+              apiKey: cfg?.apiKey ?? '',
+              model: cfg?.model ?? s.presets[0]?.model ?? '',
+              modelPro: cfg?.modelPro ?? s.presets[0]?.modelPro ?? '',
+              contextWindow: cfg?.contextWindow ?? s.presets[0]?.contextWindow ?? 128000,
+              maxCallsPerHour: cfg?.maxCallsPerHour ?? s.presets[0]?.maxCallsPerHour ?? 100
+            })
           }
         })
         .catch(() => undefined)
     }
     check()
-    // 保存后由父级刷新触发重查；这里仅初始检查一次
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [form])
 
-  const save = async (values: ModelConfig): Promise<void> => {
+  const applyPreset = (id: string): void => {
+    setPresetId(id)
+    if (id === 'custom') {
+      setCustom(true)
+      return
+    }
+    setCustom(false)
+    const p = presets.find((x) => x.id === id)
+    if (p) {
+      form.setFieldsValue({
+        baseUrl: p.baseUrl,
+        model: p.model,
+        modelPro: p.modelPro,
+        contextWindow: p.contextWindow,
+        maxCallsPerHour: p.maxCallsPerHour
+      })
+    }
+  }
+
+  const save = async (values: FormValues): Promise<void> => {
     setSubmitting(true)
     try {
-      await window.daydream.settings.update('global', { modelConfig: values })
+      await window.daydream.settings.update({
+        modelConfig: {
+          baseUrl: values.baseUrl,
+          apiKey: values.apiKey,
+          model: values.model,
+          modelPro: values.modelPro,
+          contextWindow: values.contextWindow,
+          maxCallsPerHour: values.maxCallsPerHour
+        }
+      })
       message.success('模型配置已保存（全局通用，加密存储）')
       setOpen(false)
       setModelConfigured(true)
@@ -55,29 +106,37 @@ export default function ModelConfigModal(): React.ReactNode {
       cancelButtonProps={{ style: { display: 'none' } }}
       onOk={() => form.submit()}
       confirmLoading={submitting}
-      width={520}
+      width={540}
     >
       <Alert
         type="info"
         showIcon
         style={{ marginBottom: 16 }}
-        message="模型配置为全局通用（所有账户共用）；支持 Anthropic 兼容 API（Claude / DeepSeek anthropic 端点等）。"
+        message="模型配置为全局通用（所有账户共用）；内置服务商预设（DeepSeek/OpenAI/Anthropic 等），baseURL 与模型名自动填充，仅需填写 API Key。"
       />
-      <Form form={form} layout="vertical" onFinish={save} initialValues={{ baseUrl: 'https://api.deepseek.com/anthropic', model: 'deepseek-flash', modelPro: '', contextWindow: 128000, maxCallsPerHour: 100 }}>
-        <Form.Item name="baseUrl" label="API 地址（Anthropic 兼容）" rules={[{ required: true, message: '请填写 API 地址' }]}>
-          <Input placeholder="https://api.deepseek.com/anthropic" />
+      <Form form={form} layout="vertical" onFinish={save}>
+        <Form.Item label="服务商预设（内置默认 baseURL / 模型名 / 上下文）">
+          <Select
+            placeholder="选择预设"
+            value={presetId}
+            onChange={applyPreset}
+            options={[...presets.map((p) => ({ value: p.id, label: `${p.name}（${p.model}）` })), { value: 'custom', label: '自定义（OpenAI/Anthropic 兼容）' }]}
+          />
         </Form.Item>
-        <Form.Item name="apiKey" label="API Key" rules={[{ required: true, message: '请填写 API Key' }]}>
-          <Input.Password placeholder="sk-…（加密存储，仅本机使用）" />
+        <Form.Item name="baseUrl" label="API 地址（baseURL）" rules={[{ required: true, message: '请填写 API 地址' }]}>
+          <Input placeholder="https://api.deepseek.com/anthropic" disabled={!custom} />
+        </Form.Item>
+        <Form.Item name="apiKey" label="API Key / Token" rules={[{ required: true, message: '请填写 API Key' }]}>
+          <Input.Password placeholder="加密存储，仅本机使用" />
         </Form.Item>
         <Form.Item name="model" label="主模型（评估/常规任务）" rules={[{ required: true, message: '请填写模型名' }]}>
-          <Input placeholder="deepseek-flash" />
+          <Input placeholder="deepseek-chat" disabled={!custom} />
         </Form.Item>
         <Form.Item name="modelPro" label="重型任务模型（策略生成/复盘/纠正，可选）">
-          <Input placeholder="deepseek-v4-pro（留空则复用主模型）" />
+          <Input placeholder="留空则复用主模型" disabled={!custom} />
         </Form.Item>
       </Form>
-      <div style={{ color: '#8c93a3', fontSize: 12 }}>
+      <div style={{ color: token.colorTextSecondary, fontSize: 12 }}>
         说明：模型未配置时 Agent 决策闭环不运行（数据与回测功能不受影响）；API Key 加密存储，调用统计入审计。
       </div>
     </Modal>

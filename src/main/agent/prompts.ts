@@ -21,13 +21,17 @@ export const EVALUATION_PROMPT = `你是决策闭环中的"评估"环节。根�
 export const PLANNER_PROMPT = `制定阶段性行动计划：目标、市场判断、拟研究的策略方向、优先级、时间安排。
 基于市场简报与既有策略绩效，输出结构化计划 JSON。`
 
-export const STRATEGIST_PROMPT = `生成可执行的 A 股量化交易策略 DSL。
-策略必须为声明式 JSON：universe（选股域过滤）、entry（入场条件）、exit（出场条件）、portfolio（组合约束）。
-可用的指标白名单（indicator 字段只能取这些值）：
+export const STRATEGIST_PROMPT = `生成可执行的 A 股量化交易策略文档（Markdown 格式）。
+文档要求：
+1. 用自然语言分段说明：策略逻辑、选股域、入场条件、出场条件、组合约束（每段小标题 + 要点列表）。
+2. 文档末尾必须内嵌一个 \`\`\`dsl JSON 代码块，作为确定性引擎可执行部分：
+   - 结构：{ meta: { name, description, rationale, complexity }, universe: { source: 'all_a', filters: [{ op, params }] }, entry: { logic: 'and'|'or', conditions: [{ indicator, params }] }, exit: {...}, portfolio: { max_positions, position_size: 'equal_weight'|'equal_cash', max_position_pct, rebalance: 'daily'|'weekly' } }
+   - indicator 只能取白名单值：
 ${Array.from(INDICATOR_NAMES).join(', ')}
-选股过滤操作白名单（op 字段只能取这些值）：
+   - universe.filters 的 op 只能取：
 ${Array.from(UNIVERSE_FILTERS).join(', ')}
-约束：必须通过 Schema 校验；不要生成任何代码；复杂度克制（条件总数 ≤ 20）。`
+   - 约束：必须通过 Schema 校验；不要生成任何代码；复杂度克制（条件总数 ≤ 20）。
+3. 文档不写任何交易执行指令，仅作为决策依据。`
 
 export const BACKTEST_EVALUATOR_PROMPT = `读取回测报告，按上/下线标准给出结论：
 通过（年化 > 5%、最大回撤 < 15%、样本外不显著退化、最小交易次数 30，阈值可配置）/ 不通过 / 需调整。
@@ -40,7 +44,7 @@ export const REVIEWER_PROMPT = `复盘：回顾信号与执行情况、策略表
 export const CORRECTOR_PROMPT = `依据复盘结论生成纠正方案。纠正动作谱系（按强度递增）：
 参数微调 → 结构调整（换指标/条件）→ 暂停运行 → 停用淘汰。
 强度越高所需证据越强（如淘汰需：连续多期跑输基准 + 回撤超限）。
-输出结构化纠正方案 JSON：action（tweak/restructure/pause/retire）、newDsl（如适用）、evidence、reasoning。`
+输出结构化纠正方案 JSON：action（tweak/restructure/pause/retire）、newDsl（如适用，为完整 DSL 对象，将替换策略文档中的 \`\`\`dsl 块）、evidence、reasoning。`
 
 export const USER_CHAT_PROMPT = `你是 Daydream 助手，与用户对话。用户可能下达指令（如"生成一个低波动策略""查看某股票"）、
 回答问题或批准/驳回你的建议。执行指令时调用工具；回答问题时引用真实数据；无法处理时明确说明。`

@@ -181,13 +181,13 @@ export const strategyDslSchema = z
     entry: z
       .object({
         logic: z.enum(['and', 'or']).default('and'),
-        conditions: z.array(conditionSchema).min(1).max(8)
+        conditions: z.array(conditionSchema).min(0).max(8)
       })
       .strict(),
     exit: z
       .object({
         logic: z.enum(['and', 'or']).default('or'),
-        conditions: z.array(conditionSchema).min(1).max(8)
+        conditions: z.array(conditionSchema).min(0).max(8)
       })
       .strict(),
     portfolio: z
@@ -270,4 +270,138 @@ export function parseAndValidateDsl(dslJson: string): { dsl?: StrategyDSL; error
   const result = validateStrategyDsl(parsed)
   if (!result.ok) return { errors: result.errors }
   return { dsl: parsed as StrategyDSL, errors: [] }
+}
+
+// ---------- 策略 Markdown（文档主载体，内嵌 ```dsl 代码块作为可执行部分） ----------
+
+/** ```dsl 代码块（唯一允许一个） */
+const DSL_BLOCK_RE = /```dsl\s*\n([\s\S]*?)\n```/g
+
+/**
+ * 从策略 Markdown 提取可执行 DSL：
+ * - 无 dsl 代码块 → 返回空 dsl（纯文档态，不参与确定性执行），无错误；
+ * - 存在多个块或块内 JSON 非法/未通过白名单校验 → 返回错误。
+ */
+export function extractDslFromMarkdown(markdown: string): { dsl?: StrategyDSL; errors: string[] } {
+  const matches = Array.from(markdown.matchAll(DSL_BLOCK_RE))
+  if (matches.length === 0) return { errors: [] }
+  if (matches.length > 1) return { errors: ['策略文档中存在多个 ```dsl 代码块，仅允许一个'] }
+  const code = matches[0][1] ?? ''
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(code)
+  } catch (e) {
+    return { errors: [`dsl 代码块不是合法 JSON: ${(e as Error).message}`] }
+  }
+  const result = validateStrategyDsl(parsed)
+  if (!result.ok) return { errors: result.errors }
+  return { dsl: parsed as StrategyDSL, errors: [] }
+}
+
+/** 条件列表 → markdown 列表行 */
+function conditionsToMarkdown(conds: DslCondition[]): string {
+  if (conds.length === 0) return '- （暂无）'
+  return conds
+    .map((c) => {
+      const params = Object.entries(c.params)
+        .map(([k, v]) => `${k}=${String(v)}`)
+        .join('，')
+      return `- ${c.indicator}${params ? `（${params}）` : ''}`
+    })
+    .join('\n')
+}
+
+/** 由 DSL 生成策略 Markdown（默认模板播种 / 需要重建文档的场景） */
+export function markdownFromDsl(name: string, dsl: StrategyDSL, rationale = ''): string {
+  const filters = dsl.universe.filters.length
+    ? dsl.universe.filters.map((f) => `- ${f.op}${Object.keys(f.params).length ? `（${Object.entries(f.params).map(([k, v]) => `${k}=${String(v)}`).join('，')}）` : ''}`).join('\n')
+    : '- （无）'
+  return [
+    `# ${name}`,
+    '',
+    '> 本策略文档为 Markdown 文本，可自由编辑；```dsl 代码块是可执行部分（由确定性引擎解释执行，仅支持白名单指标）。',
+    '',
+    '## 策略逻辑',
+    '',
+    dsl.meta.description || '（待补充：策略思路与逻辑说明）',
+    '',
+    `理由：${dsl.meta.rationale || rationale || '（待补充）'} `,
+    '',
+    '## 选股域',
+    '',
+    filters,
+    '',
+    '## 入场条件',
+    '',
+    `逻辑：${dsl.entry.logic === 'and' ? '且（AND）' : '或（OR）'}`,
+    '',
+    conditionsToMarkdown(dsl.entry.conditions),
+    '',
+    '## 出场条件',
+    '',
+    `逻辑：${dsl.exit.logic === 'and' ? '且（AND）' : '或（OR）'}`,
+    '',
+    conditionsToMarkdown(dsl.exit.conditions),
+    '',
+    '## 组合约束',
+    '',
+    `- 最大持仓数：${dsl.portfolio.max_positions}`,
+    `- 仓位方式：${dsl.portfolio.position_size === 'equal_weight' ? '等权' : '等额资金'}`,
+    `- 单票仓位上限：${dsl.portfolio.max_position_pct}`,
+    `- 再平衡：${dsl.portfolio.rebalance === 'daily' ? '每日' : '每周'}`,
+    '',
+    '## 可执行 DSL',
+    '',
+    '```dsl',
+    JSON.stringify(dsl, null, 2),
+    '```',
+    ''
+  ].join('\n')
+}
+
+/** 替换/追加文档中的 ```dsl 代码块（用于纠正等只改执行层的场景，保留手写内容） */
+export function upsertDslBlockInMarkdown(markdown: string, dsl: StrategyDSL): string {
+  const block = ['```dsl', JSON.stringify(dsl, null, 2), '```'].join('\n')
+  if (!DSL_BLOCK_RE.test(markdown)) {
+    const trailer = markdown.endsWith('\n') ? '' : '\n'
+    return `${markdown}${trailer}\n## 可执行 DSL\n\n${block}\n`
+  }
+  return markdown.replace(DSL_BLOCK_RE, block)
+}
+
+// ---------- 用户偏好 Schema（仅用户可改） ----------
+export const notifyPrefsSchema = z
+  .object({
+    signals: z.boolean(),
+    alerts: z.boolean(),
+    summaries: z.boolean(),
+    quietHours: z.string().regex(/^\d{2}:\d{2}-\d{2}:\d{2}$/).default('22:00-08:00')
+  })
+  .strict()
+
+export const preferencesSchema = z
+  .object({
+    riskTolerance: z.enum(['conservative', 'moderate', 'aggressive']),
+    investmentStyle: z.enum(['value', 'growth', 'trend', 'blend']),
+    expectedAnnualReturn: z.number().min(0).max(10),
+    maxDrawdownTolerance: z.number().min(0.01).max(0.9),
+    holdingPeriod: z.enum(['short', 'swing', 'long']),
+    preferredIndustries: z.array(z.string().max(50)).max(20),
+    excludedIndustries: z.array(z.string().max(50)).max(20),
+    maxPositions: z.number().int().min(1).max(50),
+    maxPositionPct: z.number().min(0.01).max(1),
+    maxTotalPositionPct: z.number().min(0.01).max(1),
+    tradeFrequency: z.enum(['low', 'medium', 'high']),
+    autonomyLevel: z.enum(['conservative', 'standard', 'aggressive']),
+    notify: notifyPrefsSchema
+  })
+  .strict()
+
+export type StrategyPreferences = z.infer<typeof preferencesSchema>
+
+/** 校验用户偏好（返回错误列表，空数组即合法） */
+export function validatePreferences(prefs: unknown): string[] {
+  const parsed = preferencesSchema.safeParse(prefs)
+  if (parsed.success) return []
+  return parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`)
 }

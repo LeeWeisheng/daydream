@@ -132,3 +132,101 @@ export const SCHEDULE = {
   reviewWeeklyTime: '17:30', // 周五周复盘
   monitorIntervalMinutes: 2 // 盘中盯盘间隔（可配）
 } as const
+
+// ---------- 账户资金 ----------
+export const DEFAULT_INITIAL_CASH = 100_000 // 新账户默认可用资金
+
+// ---------- 模型内置预设（选择后自动填充 baseURL / 模型名 / 上下文等） ----------
+export const MODEL_PRESETS = [
+  {
+    id: 'deepseek',
+    name: 'DeepSeek',
+    baseUrl: 'https://api.deepseek.com/anthropic',
+    model: 'deepseek-chat',
+    modelPro: 'deepseek-reasoner',
+    contextWindow: 128000,
+    maxCallsPerHour: 100
+  },
+  {
+    id: 'openai',
+    name: 'OpenAI',
+    baseUrl: 'https://api.openai.com/v1',
+    model: 'gpt-4o-mini',
+    modelPro: 'gpt-4o',
+    contextWindow: 128000,
+    maxCallsPerHour: 100
+  },
+  {
+    id: 'anthropic',
+    name: 'Anthropic',
+    baseUrl: 'https://api.anthropic.com',
+    model: 'claude-sonnet-4-20250514',
+    modelPro: 'claude-opus-4-20250514',
+    contextWindow: 200000,
+    maxCallsPerHour: 100
+  },
+  {
+    id: 'moonshot',
+    name: 'Moonshot 月之暗面',
+    baseUrl: 'https://api.moonshot.cn/v1',
+    model: 'moonshot-v1-8k',
+    modelPro: 'moonshot-v1-32k',
+    contextWindow: 32768,
+    maxCallsPerHour: 80
+  },
+  {
+    id: 'qwen',
+    name: '通义千问 Qwen',
+    baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    model: 'qwen-plus',
+    modelPro: 'qwen-max',
+    contextWindow: 131072,
+    maxCallsPerHour: 100
+  },
+  {
+    id: 'zhipu',
+    name: '智谱 GLM',
+    baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
+    model: 'glm-4-flash',
+    modelPro: 'glm-4-plus',
+    contextWindow: 128000,
+    maxCallsPerHour: 80
+  },
+  {
+    id: 'siliconflow',
+    name: '硅基流动 SiliconFlow',
+    baseUrl: 'https://api.siliconflow.cn/v1',
+    model: 'deepseek-ai/DeepSeek-V3',
+    modelPro: 'deepseek-ai/DeepSeek-R1',
+    contextWindow: 65536,
+    maxCallsPerHour: 100
+  }
+] as const
+
+// ---------- 默认用户偏好（账户创建时播种） ----------
+export const DEFAULT_PREFERENCES = {
+  riskTolerance: 'moderate',
+  investmentStyle: 'trend',
+  expectedAnnualReturn: 0.15,
+  maxDrawdownTolerance: 0.15,
+  holdingPeriod: 'swing',
+  preferredIndustries: [],
+  excludedIndustries: [],
+  maxPositions: 5,
+  maxPositionPct: 0.2,
+  maxTotalPositionPct: 0.8,
+  tradeFrequency: 'medium',
+  autonomyLevel: 'conservative',
+  notify: { signals: true, alerts: true, summaries: true, quietHours: '22:00-08:00' }
+} as const
+
+/** 默认策略 DSL 模板（账户创建时播种，draft 状态待填写/由 Agent 生成） */
+export function emptyDslTemplate(name: string): Record<string, unknown> {
+  return {
+    meta: { name, description: '待完善', rationale: '', complexity: 1 },
+    universe: { source: 'all_a', filters: [] },
+    entry: { logic: 'and', conditions: [] },
+    exit: { logic: 'or', conditions: [] },
+    portfolio: { max_positions: 5, position_size: 'equal_weight', max_position_pct: 0.2, rebalance: 'daily' }
+  }
+}

@@ -1,12 +1,13 @@
 /**
  * IPC Handler：白名单通道注册（`域:动作` 命名）。
  * 事件推送统一走 `daydream:event` 通道；密钥类配置不回传明文。
+ * 本次重构：每账户唯一策略（DSL+偏好）、交易资金联动、对话流、主题、窗口控制、数据 CRUD。
  */
 import { ipcMain, BrowserWindow, safeStorage } from 'electron'
 import { randomUUID } from 'node:crypto'
-import { IPC, type SettingsPatch, type SignalFeedbackReq, type ReportRespondReq } from '@shared/ipc'
-import type { Account, ModelConfig, Report, Signal, Strategy } from '@shared/types'
-import { ensureAccount, firstAccount, createAccount as dbCreateAccount, getDb, nowIso, queryAll, run } from '../db'
+import { IPC, type SettingsPatch, type SignalFeedbackReq, type ReportRespondReq, type StrategySaveReq, type TradeOrderReq, type StockUpsertReq, type KlineUpsertReq } from '@shared/ipc'
+import type { Account, AccountSummary, ModelConfig, Report, Signal, Strategy, StrategyVersion } from '@shared/types'
+import { ensureAccount, firstAccount, createAccount as dbCreateAccount, getDb, nowIso, queryAll, run, inTransaction } from '../db'
 import { audit } from '../services/audit'
 import { encryptString, decryptString } from '../services/crypto'
 import { logger } from '../services/logger'
@@ -15,20 +16,20 @@ import { initialSync, dailyUpdate, dataTaskState } from '../data/pipeline'
 import { providerManager } from '../data/providers/base'
 import { EastmoneyProvider } from '../data/providers/eastmoney'
 import { TencentProvider } from '../data/providers/tencent'
-import * as backtestPipeline from '../pipeline/backtester'
 import * as runnerPipeline from '../pipeline/runner'
-import * as reviewPipeline from '../pipeline/reviewer'
-import { parseAndValidateDsl } from '@shared/strategy/schema'
-import { calcFee } from '@shared/constants'
+import { extractDslFromMarkdown, validatePreferences } from '@shared/strategy/schema'
+import { calcFee, DEFAULT_INITIAL_CASH, MODEL_PRESETS } from '@shared/constants'
 import { agentEventBus, subscribeAgentEvents } from '../agent/events'
 import { createWorkItem, listWorkItems } from '../agent/workitem'
 import { getAgentStatus, retryWorkItem, cancelWorkItem, setAgentRunning, isAgentRunning } from '../agent/loop'
-import { createStrategyDirect } from '../agent/tools'
-import { computeSnapshotMetrics, computeSignalDeviation, computeTradeStats } from '../perf/engine'
 import { isModelConfigured } from '../agent/llm'
 import { getModelConfig, saveModelConfig, GLOBAL_CONFIG_ACCOUNT } from '../agent/modelConfig'
+import { getTheme, setTheme as persistTheme } from '../theme'
+import { addChatMessage, listChatMessages, formatReportContent } from '../chat'
+import { getRunMode, setRunMode as persistRunMode } from '../runMode'
+import { applyReportDecision } from '../reportDecision'
 
-/** 活跃账户（Agent/调度器运行的资金视角；顶栏切换时更新） */
+/** 活跃账户（Agent/调度器运行的资金视角；header 账户下拉切换时更新） */
 let activeAccountId = ''
 
 export function getActiveAccountId(): string {
@@ -49,9 +50,10 @@ function bridgeAgentEvents(): void {
       'signal.new': 'signal.new',
       'alert.triggered': 'alert.triggered',
       'agent.report': 'agent.report',
+      'chat.message': 'chat.message',
       'workitem.completed': 'workitem.updated',
       'workitem.failed': 'workitem.updated',
-      'backtest.completed': 'backtest.finished',
+      'backtest.completed': 'strategy.updated',
       'strategy.updated': 'strategy.updated',
       'strategy.activated': 'strategy.updated',
       'plan.completed': 'agent.status'
@@ -73,29 +75,244 @@ function toAccount(row: Record<string, unknown>): Account {
   }
 }
 
+// ---------- 策略（每账户唯一一份，Markdown 主载体 + 内嵌 ```dsl 块同步执行层） ----------
+function toStrategy(row: Record<string, unknown>): Strategy {
+  return {
+    id: String(row.id),
+    accountId: String(row.account_id),
+    name: String(row.name),
+    version: Number(row.version),
+    markdown: String(row.markdown ?? ''),
+    dslJson: String(row.dsl_json),
+    preferencesJson: String(row.preferences_json ?? '{}'),
+    status: row.status as Strategy['status'],
+    createdBy: String(row.created_by),
+    rationale: String(row.rationale),
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at)
+  }
+}
+
+function getAccountStrategy(accountId: string): Strategy | undefined {
+  const row = queryAll<Record<string, unknown>>('SELECT * FROM strategy WHERE account_id = ?', [accountId])[0]
+  return row ? toStrategy(row) : undefined
+}
+
+function saveStrategy(req: StrategySaveReq): Strategy {
+  const existing = getAccountStrategy(req.accountId)
+  if (!existing) throw new Error('策略不存在')
+  const now = nowIso()
+
+  // Markdown 变更（唯一载体）：提取 ```dsl 块同步执行层，新版本留档
+  let markdown = existing.markdown
+  let dslJson = existing.dslJson
+  if (req.markdown !== undefined && req.markdown !== existing.markdown) {
+    const extracted = extractDslFromMarkdown(req.markdown)
+    if (extracted.errors.length > 0) throw new Error(`策略 Markdown 校验失败: ${extracted.errors.join('; ')}`)
+    markdown = req.markdown
+    // 无 dsl 块 → 文档态（清空执行层，自动运行跳过）；有块 → 同步 dsl_json
+    dslJson = extracted.dsl ? JSON.stringify(extracted.dsl, null, 2) : ''
+  }
+  // 偏好变更：仅用户可改（Agent 只读）
+  let preferencesJson = existing.preferencesJson
+  if (req.preferencesJson !== undefined) {
+    if (req.actor !== 'user') throw new Error('用户偏好仅用户可修改')
+    const errors = validatePreferences(JSON.parse(req.preferencesJson))
+    if (errors.length > 0) throw new Error(`用户偏好校验失败: ${errors.join('; ')}`)
+    preferencesJson = req.preferencesJson
+  }
+  const name = req.name?.trim() || existing.name
+  const dslChanged = dslJson !== existing.dslJson
+  const contentChanged = dslChanged || markdown !== existing.markdown
+  const newVersion = contentChanged ? existing.version + 1 : existing.version
+
+  inTransaction(() => {
+    run('UPDATE strategy SET name = ?, markdown = ?, dsl_json = ?, preferences_json = ?, version = ?, updated_at = ? WHERE id = ?', [
+      name,
+      markdown,
+      dslJson,
+      preferencesJson,
+      newVersion,
+      now,
+      existing.id
+    ])
+    if (contentChanged) {
+      run('INSERT INTO strategy_version (id, strategy_id, version, markdown, dsl_json, change_log, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)', [
+        randomUUID(),
+        existing.id,
+        newVersion,
+        markdown,
+        dslJson,
+        req.changeLog || `${req.actor === 'agent' ? 'Agent 迭代' : '用户修改'}`,
+        now
+      ])
+    }
+  })
+  // 偏好中的自主级别同步到账户列（兼容保留字段）
+  try {
+    const prefs = JSON.parse(preferencesJson) as { autonomyLevel?: string }
+    if (prefs.autonomyLevel) run('UPDATE account SET autonomy_level = ? WHERE id = ?', [prefs.autonomyLevel, req.accountId])
+  } catch {
+    /* 忽略 */
+  }
+  audit({ accountId: req.accountId, actor: req.actor, action: 'strategy.save', target: existing.id, detail: { contentChanged, version: newVersion } })
+  agentEventBus.emitAgentEvent('strategy.updated', req.accountId, { strategyId: existing.id, dslChanged }, { debounceMs: 0 })
+  return getAccountStrategy(req.accountId)!
+}
+
+// ---------- 交易与资金 ----------
+/** 买入/卖出联动：现金、持仓、成交记录在同一事务内完成 */
+export function executeTradeOrder(req: TradeOrderReq): void {
+  const account = ensureAccount(req.accountId)
+  if (!account) throw new Error('账户不存在')
+  const qty = Math.max(1, Math.floor(req.qty))
+  const price = req.price
+  const amount = Math.round(price * qty * 100) / 100
+  const fee = req.fee !== undefined ? req.fee : calcFee(req.side, amount)
+
+  inTransaction(() => {
+    const acc = queryAll<{ cash: number }>('SELECT cash FROM account WHERE id = ?', [req.accountId])[0]
+    if (!acc) throw new Error('账户不存在')
+    let cash = acc.cash
+    if (req.side === 'buy') {
+      if (cash < amount + fee) throw new Error(`可用资金不足：需要 ${(amount + fee).toFixed(2)}，可用 ${cash.toFixed(2)}`)
+      cash = Math.round((cash - amount - fee) * 100) / 100
+    } else {
+      const pos = queryAll<{ qty: number }>('SELECT qty FROM position WHERE account_id = ? AND code = ?', [req.accountId, req.code])[0]
+      if (!pos || pos.qty < qty) throw new Error(`持仓不足：当前持有 ${pos?.qty ?? 0}，卖出 ${qty}`)
+      cash = Math.round((cash + amount - fee) * 100) / 100
+    }
+    run('UPDATE account SET cash = ?, updated_at = ? WHERE id = ?', [cash, nowIso(), req.accountId])
+
+    // 持仓联动
+    const pos = queryAll<{ qty: number; cost_price: number }>('SELECT qty, cost_price FROM position WHERE account_id = ? AND code = ?', [
+      req.accountId,
+      req.code
+    ])[0]
+    if (req.side === 'buy') {
+      const newQty = (pos?.qty ?? 0) + qty
+      const newCost = pos ? (pos.cost_price * pos.qty + amount + fee) / newQty : (amount + fee) / newQty
+      run(
+        'INSERT INTO position (account_id, code, qty, cost_price, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(account_id, code) DO UPDATE SET qty=excluded.qty, cost_price=excluded.cost_price, updated_at=excluded.updated_at',
+        [req.accountId, req.code, newQty, Math.round(newCost * 10000) / 10000, nowIso()]
+      )
+    } else {
+      const newQty = (pos?.qty ?? 0) - qty
+      if (newQty <= 0) run('DELETE FROM position WHERE account_id = ? AND code = ?', [req.accountId, req.code])
+      else run('UPDATE position SET qty = ?, updated_at = ? WHERE account_id = ? AND code = ?', [newQty, nowIso(), req.accountId, req.code])
+    }
+
+    run('INSERT INTO trade_record (id, account_id, code, side, price, qty, fee, traded_at, signal_id, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', [
+      randomUUID(),
+      req.accountId,
+      req.code,
+      req.side,
+      price,
+      qty,
+      fee,
+      req.tradedAt || nowIso(),
+      req.signalId ?? null,
+      req.note ?? null
+    ])
+  })
+  audit({ accountId: req.accountId, actor: 'user', action: `trade.${req.side}`, target: req.code, detail: { price, qty, fee } })
+}
+
+function buildAccountSummary(accountId: string): AccountSummary {
+  const acc = queryAll<{ cash: number; config_json: string }>('SELECT cash, config_json FROM account WHERE id = ?', [accountId])[0]
+  const cash = acc?.cash ?? DEFAULT_INITIAL_CASH
+  let initialCash = DEFAULT_INITIAL_CASH
+  try {
+    const cfg = JSON.parse(acc?.config_json ?? '{}') as { initialCash?: number }
+    if (cfg.initialCash) initialCash = cfg.initialCash
+  } catch {
+    /* 忽略 */
+  }
+  const positions = queryAll<{ code: string; qty: number; cost_price: number }>(
+    'SELECT code, qty, cost_price FROM position WHERE account_id = ?',
+    [accountId]
+  )
+  let marketValue = 0
+  let positionPnl = 0
+  const details = positions.map((p) => {
+    const quote = queryAll<{ price: number }>('SELECT price FROM market_quote WHERE code = ?', [p.code])[0]
+    const nameRow = queryAll<{ name: string }>('SELECT name FROM stock_basic WHERE code = ?', [p.code])[0]
+    const price = quote?.price ?? p.cost_price
+    const mv = Math.round(p.qty * price * 100) / 100
+    const pnl = Math.round((price - p.cost_price) * p.qty * 100) / 100
+    marketValue += mv
+    positionPnl += pnl
+    return {
+      code: p.code,
+      name: nameRow?.name ?? p.code,
+      qty: p.qty,
+      costPrice: p.cost_price,
+      price,
+      marketValue: mv,
+      pnl,
+      pnlPct: p.cost_price > 0 ? Math.round(((price - p.cost_price) / p.cost_price) * 10000) / 100 : 0,
+      positionPct: 0
+    }
+  })
+  const totalAssets = Math.round((cash + marketValue) * 100) / 100
+  for (const d of details) d.positionPct = totalAssets > 0 ? Math.round((d.marketValue / totalAssets) * 10000) / 100 : 0
+  const snapshots = queryAll<{ date: string; total_assets: number }>(
+    'SELECT date, total_assets FROM account_snapshot WHERE account_id = ? ORDER BY date ASC',
+    [accountId]
+  )
+  const prev = snapshots[snapshots.length - 2]
+  return {
+    accountId,
+    cash,
+    initialCash,
+    marketValue: Math.round(marketValue * 100) / 100,
+    totalAssets,
+    positionPnl: Math.round(positionPnl * 100) / 100,
+    totalPnl: Math.round((totalAssets - initialCash) * 100) / 100,
+    todayPnl: prev ? Math.round((totalAssets - prev.total_assets) * 100) / 100 : 0,
+    positionPct: totalAssets > 0 ? Math.round((marketValue / totalAssets) * 10000) / 100 : 0,
+    positionCount: positions.length,
+    positions: details,
+    equityCurve: snapshots.map((s) => ({ date: s.date, totalAssets: s.total_assets }))
+  }
+}
+
 // ---------- 设置（模型配置全局通用） ----------
-function getSettings(accountId: string): { modelConfig?: ModelConfig; autonomyLevel?: string; monitorIntervalMinutes?: number; modelConfigured: boolean } {
-  void accountId
-  const account = firstAccount()
+function getSettings(_accountId: string): {
+  modelConfig?: ModelConfig
+  presets: typeof MODEL_PRESETS
+  theme: ReturnType<typeof getTheme>
+  modelConfigured: boolean
+  monitorIntervalMinutes?: number
+  dataSourcePreference?: string
+} {
   const cfg = getModelConfig()
   const modelConfig: ModelConfig | undefined = cfg ? { ...cfg, apiKey: cfg.apiKey ? '********' : '' } : undefined // 密钥不回传明文
   return {
     modelConfig,
-    autonomyLevel: account ? 'conservative' : 'conservative',
-    monitorIntervalMinutes: 2,
-    modelConfigured: isModelConfigured()
+    presets: MODEL_PRESETS,
+    theme: getTheme(),
+    modelConfigured: isModelConfigured(),
+    monitorIntervalMinutes: 2
   }
 }
 
-function updateSettings(accountId: string, patch: SettingsPatch): void {
-  if (patch.autonomyLevel) {
-    const account = ensureAccount(accountId)
-    if (account) run('UPDATE account SET autonomy_level = ?, updated_at = ? WHERE id = ?', [patch.autonomyLevel, nowIso(), account.id])
-  }
+function updateSettings(_accountId: string, patch: SettingsPatch): void {
+  void _accountId
   if (patch.modelConfig) {
     // 模型配置全局通用（所有账户共用）
     saveModelConfig(patch.modelConfig, encryptString, nowIso, (sql, params) => run(sql, params))
     audit({ accountId: GLOBAL_CONFIG_ACCOUNT, actor: 'user', action: 'settings.model_config.updated' })
+  }
+  if (patch.monitorIntervalMinutes || patch.dataSourcePreference || patch.initYears) {
+    run(
+      `INSERT INTO app_config (account_id, scope, key, value_encrypted, updated_at) VALUES ('global', 'global', 'data_prefs', ?, ?)
+       ON CONFLICT(account_id, key) DO UPDATE SET value_encrypted = excluded.value_encrypted, updated_at = excluded.updated_at`,
+      [
+        JSON.stringify({ monitorIntervalMinutes: patch.monitorIntervalMinutes, dataSourcePreference: patch.dataSourcePreference, initYears: patch.initYears }),
+        nowIso()
+      ]
+    )
   }
 }
 
@@ -116,8 +333,15 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(IPC.accountSwitch, (_e, req: { accountId: string }) => {
     const row = queryAll<Record<string, unknown>>('SELECT * FROM account WHERE id = ?', [req.accountId])[0]
     if (!row) throw new Error('账户不存在')
+    // 切换账户不中断 Agent 运行：仅更新资金视角（运行开关是全局状态）
     activeAccountId = req.accountId
     return toAccount(row)
+  })
+  ipcMain.handle(IPC.accountRename, (_e, req: { accountId: string; name: string }) => {
+    if (!req.name?.trim()) throw new Error('账户名称不能为空')
+    run('UPDATE account SET name = ?, updated_at = ? WHERE id = ?', [req.name.trim(), nowIso(), req.accountId])
+    audit({ accountId: req.accountId, actor: 'user', action: 'account.rename', detail: { name: req.name.trim() } })
+    return toAccount(queryAll<Record<string, unknown>>('SELECT * FROM account WHERE id = ?', [req.accountId])[0])
   })
   ipcMain.handle(IPC.accountDelete, (_e, accountId: string) => {
     run('DELETE FROM account WHERE id = ?', [accountId])
@@ -127,13 +351,45 @@ export function registerIpcHandlers(): void {
 
   // 设置
   ipcMain.handle(IPC.settingsGet, (_e, accountId: string) => getSettings(accountId))
-  ipcMain.handle(IPC.settingsUpdate, (_e, accountId: string, patch: SettingsPatch) => updateSettings(accountId, patch))
+  ipcMain.handle(IPC.settingsUpdate, (_e, _accountId: string, patch: SettingsPatch) => updateSettings(_accountId, patch))
+
+  // 主题
+  ipcMain.handle(IPC.themeGet, () => getTheme())
+  ipcMain.handle(IPC.themeSet, (_e, mode: 'light' | 'dark' | 'system') => {
+    const next = persistTheme(mode)
+    broadcast({ type: 'agent.status', payload: { theme: next } })
+    return next
+  })
+
+  // 运行模式（manual 手动 / auto 自动：自动处理审批与信号，用于策略验证）
+  ipcMain.handle(IPC.runModeGet, () => getRunMode())
+  ipcMain.handle(IPC.runModeSet, (_e, mode: 'manual' | 'auto') => {
+    const next = persistRunMode(mode)
+    audit({ accountId: getActiveAccountId() || 'global', actor: 'user', action: 'run_mode.set', detail: { mode: next } })
+    broadcast({ type: 'runMode.changed', payload: { runMode: next } })
+    return next
+  })
+
+  // 窗口控制（自绘标题栏）
+  ipcMain.handle(IPC.windowMinimize, (e) => BrowserWindow.fromWebContents(e.sender)?.minimize())
+  ipcMain.handle(IPC.windowToggleMaximize, (e) => {
+    const win = BrowserWindow.fromWebContents(e.sender)
+    if (!win) return false
+    if (win.isMaximized()) win.unmaximize()
+    else win.maximize()
+    return win.isMaximized()
+  })
+  ipcMain.handle(IPC.windowClose, (e) => BrowserWindow.fromWebContents(e.sender)?.close())
+  ipcMain.handle(IPC.windowIsMaximized, (e) => BrowserWindow.fromWebContents(e.sender)?.isMaximized() ?? false)
+  ipcMain.handle(IPC.windowIsFullScreen, (e) => BrowserWindow.fromWebContents(e.sender)?.isFullScreen() ?? false)
 
   // 数据
   ipcMain.handle(IPC.dataGetStockList, () => dataService.getStockList())
   ipcMain.handle(IPC.dataGetQuote, (_e, codes: string[]) => dataService.getQuotes(codes))
   ipcMain.handle(IPC.dataGetKline, (_e, req: { code: string; start: string; end: string }) => dataService.getDailyKline(req.code, req.start, req.end))
+  ipcMain.handle(IPC.dataGetIndexDaily, (_e, req: { code: string; start: string; end: string }) => dataService.getIndexDaily(req.code, req.start, req.end))
   ipcMain.handle(IPC.dataGetDataStatus, () => dataService.getDataStatus())
+  ipcMain.handle(IPC.dataGetDataStats, () => dataService.getDataStats())
   ipcMain.handle(IPC.dataInitialSync, async () => {
     initialSync(3, (done, total, message) => broadcast({ type: 'data.progress', payload: { done, total, message } })).catch((e) =>
       logger.error(`[ipc] initial sync failed: ${(e as Error).message}`)
@@ -146,97 +402,157 @@ export function registerIpcHandlers(): void {
     )
     return { started: true }
   })
-
-  // 策略（全局共享：所有账户共用同一策略库，资金/持仓隔离由信号与持仓表承担）
-  ipcMain.handle(IPC.strategyList, () =>
-    queryAll<Record<string, unknown>>('SELECT * FROM strategy ORDER BY created_at DESC')
-  )
-  ipcMain.handle(IPC.strategyGet, (_e, id: string) => queryAll<Record<string, unknown>>('SELECT * FROM strategy WHERE id = ?', [id])[0])
-  ipcMain.handle(IPC.strategyCreate, (_e, req: { accountId: string; name: string; dslJson: string; rationale?: string }) => {
-    const { errors } = parseAndValidateDsl(req.dslJson)
-    if (errors.length > 0) throw new Error(`DSL 校验失败: ${errors.join('; ')}`)
-    return createStrategyDirect(req.accountId, req.name, req.dslJson, req.rationale ?? '', 'user')
+  // 数据 CRUD（Agent 运行时同样可用）
+  ipcMain.handle(IPC.dataUpsertStock, (_e, req: StockUpsertReq) => {
+    if (!req.code || !req.name) throw new Error('代码与名称不能为空')
+    run(
+      `INSERT INTO stock_basic (code, name, exchange, industry, status, updated_at) VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(code) DO UPDATE SET name=excluded.name, exchange=excluded.exchange, industry=excluded.industry, status=excluded.status, updated_at=excluded.updated_at`,
+      [req.code, req.name, req.exchange ?? 'SH', req.industry ?? null, req.status ?? 'listed', nowIso()]
+    )
+    audit({ accountId: getActiveAccountId() || 'global', actor: 'user', action: 'data.stock.upsert', target: req.code })
   })
-  ipcMain.handle(IPC.strategyUpdate, (_e, req: { id: string; dslJson: string; changeLog: string }) => {
-    const { errors } = parseAndValidateDsl(req.dslJson)
-    if (errors.length > 0) throw new Error(`DSL 校验失败: ${errors.join('; ')}`)
-    const existing = queryAll<{ version: number }>('SELECT version FROM strategy WHERE id = ?', [req.id])[0]
-    if (!existing) throw new Error('策略不存在')
-    const next = existing.version + 1
-    const now = nowIso()
-    run('UPDATE strategy SET dsl_json = ?, version = ?, updated_at = ? WHERE id = ?', [req.dslJson, next, now, req.id])
-    run('INSERT INTO strategy_version (id, strategy_id, version, dsl_json, change_log, created_at) VALUES (?, ?, ?, ?, ?, ?)', [
-      randomUUID(),
-      req.id,
-      next,
-      req.dslJson,
-      req.changeLog,
-      now
-    ])
-    return queryAll<Record<string, unknown>>('SELECT * FROM strategy WHERE id = ?', [req.id])[0]
+  ipcMain.handle(IPC.dataDeleteStock, (_e, code: string) => {
+    inTransaction(() => {
+      run('DELETE FROM kline_daily WHERE code = ?', [code])
+      run('DELETE FROM market_quote WHERE code = ?', [code])
+      run('DELETE FROM data_status WHERE code = ?', [code])
+      run('DELETE FROM stock_basic WHERE code = ?', [code])
+    })
+    audit({ accountId: getActiveAccountId() || 'global', actor: 'user', action: 'data.stock.delete', target: code })
   })
-  ipcMain.handle(IPC.strategyActivate, async (_e, req: { accountId: string; id: string }) => runnerPipeline.activateStrategy(req.accountId, { strategyId: req.id }))
-  ipcMain.handle(IPC.strategyDeactivate, (_e, req: { accountId: string; id: string; reason?: string }) =>
-    runnerPipeline.deactivateStrategy(req.accountId, req.id, req.reason ?? '')
-  )
+  ipcMain.handle(IPC.dataUpsertKline, (_e, req: KlineUpsertReq) => {
+    if (!req.code || !req.date) throw new Error('代码与日期不能为空')
+    if (!(req.high >= req.low && req.high >= req.open && req.low <= req.close)) throw new Error('OHLC 数据非法（最高价必须 ≥ 最低价）')
+    run(
+      `INSERT INTO kline_daily (code, date, open, high, low, close, volume, amount, adj_factor) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(code, date) DO UPDATE SET open=excluded.open, high=excluded.high, low=excluded.low, close=excluded.close, volume=excluded.volume, amount=excluded.amount, adj_factor=excluded.adj_factor`,
+      [req.code, req.date, req.open, req.high, req.low, req.close, req.volume, req.amount, req.adjFactor ?? 1]
+    )
+    run(
+      `INSERT INTO data_status (code, last_update_date, integrity_level, updated_at) VALUES (?, ?, 1, ?)
+       ON CONFLICT(code) DO UPDATE SET last_update_date=excluded.last_update_date, updated_at=excluded.updated_at`,
+      [req.code, req.date, nowIso()]
+    )
+  })
+  ipcMain.handle(IPC.dataDeleteKline, (_e, req: { code: string; date: string }) => {
+    run('DELETE FROM kline_daily WHERE code = ? AND date = ?', [req.code, req.date])
+  })
 
-  // 回测
-  ipcMain.handle(IPC.backtestStart, (_e, req: { accountId: string; strategyVersionId: string; start: string; end: string }) =>
-    backtestPipeline.startBacktestTask(req.accountId, req.strategyVersionId, req.start, req.end).then((runId) => ({ runId }))
-  )
-  ipcMain.handle(IPC.backtestCancel, (_e, runId: string) => run("UPDATE backtest_run SET status = 'failed', error = '已取消' WHERE id = ? AND status IN ('pending','running')", [runId]))
-  ipcMain.handle(IPC.backtestList, (_e, accountId: string) =>
-    queryAll(
-      `SELECT br.* FROM backtest_run br
-       JOIN strategy_version sv ON sv.id = br.strategy_version_id
-       JOIN strategy s ON s.id = sv.strategy_id
-       WHERE s.account_id = ? ORDER BY br.created_at DESC LIMIT 200`,
-      [accountId]
+  // 策略（每账户唯一一份）
+  ipcMain.handle(IPC.strategyGetForAccount, (_e, accountId: string) => getAccountStrategy(accountId) ?? null)
+  ipcMain.handle(IPC.strategySave, (_e, req: StrategySaveReq) => saveStrategy(req))
+  ipcMain.handle(IPC.strategyGetVersions, (_e, strategyId: string) =>
+    queryAll<Record<string, unknown>>('SELECT * FROM strategy_version WHERE strategy_id = ? ORDER BY version DESC', [strategyId]).map(
+      (r): StrategyVersion => ({
+        id: String(r.id),
+        strategyId: String(r.strategy_id),
+        version: Number(r.version),
+        markdown: String(r.markdown ?? ''),
+        dslJson: String(r.dsl_json),
+        changeLog: String(r.change_log),
+        createdAt: String(r.created_at)
+      })
     )
   )
-  ipcMain.handle(IPC.backtestGetResult, (_e, runId: string) => queryAll<Record<string, unknown>>('SELECT * FROM backtest_run WHERE id = ?', [runId])[0])
-  ipcMain.handle(IPC.backtestGetTrades, (_e, runId: string) => queryAll('SELECT * FROM backtest_trade WHERE run_id = ? ORDER BY traded_at', [runId]))
+  ipcMain.handle(IPC.strategyRollback, (_e, req: { accountId: string; versionId: string }) => {
+    const v = queryAll<{ strategy_id: string; version: number; dsl_json: string; markdown: string }>('SELECT * FROM strategy_version WHERE id = ?', [req.versionId])[0]
+    if (!v) throw new Error('版本不存在')
+    run('UPDATE strategy SET markdown = ?, dsl_json = ?, version = ?, updated_at = ? WHERE id = ? AND account_id = ?', [
+      v.markdown ?? '',
+      v.dsl_json,
+      v.version,
+      nowIso(),
+      v.strategy_id,
+      req.accountId
+    ])
+    audit({ accountId: req.accountId, actor: 'user', action: 'strategy.rollback', target: v.strategy_id, detail: { toVersion: v.version } })
+    return getAccountStrategy(req.accountId)
+  })
+  ipcMain.handle(IPC.strategyActivate, async (_e, req: { accountId: string }) => {
+    const s = getAccountStrategy(req.accountId)
+    if (!s) throw new Error('策略不存在')
+    await runnerPipeline.activateStrategy(req.accountId, { strategyId: s.id })
+  })
+  ipcMain.handle(IPC.strategyDeactivate, (_e, req: { accountId: string; reason?: string }) => {
+    const s = getAccountStrategy(req.accountId)
+    if (!s) throw new Error('策略不存在')
+    return runnerPipeline.deactivateStrategy(req.accountId, s.id, req.reason ?? '')
+  })
+  ipcMain.handle(IPC.strategyGetLatestBacktest, (_e, accountId: string) => {
+    const s = getAccountStrategy(accountId)
+    if (!s) return null
+    const row = queryAll<Record<string, unknown>>(
+      `SELECT br.* FROM backtest_run br
+       JOIN strategy_version sv ON sv.id = br.strategy_version_id
+       WHERE sv.strategy_id = ? ORDER BY br.created_at DESC LIMIT 1`,
+      [s.id]
+    )[0]
+    return row ?? null
+  })
+
+  // 交易（人工录入，联动资金与持仓）
+  ipcMain.handle(IPC.tradeOrder, (_e, req: TradeOrderReq) => {
+    executeTradeOrder(req)
+    broadcast({ type: 'signal.updated', payload: { accountId: req.accountId, kind: 'trade', code: req.code } })
+    collectAccountSnapshot(req.accountId)
+  })
+  ipcMain.handle(IPC.tradeList, (_e, accountId: string) =>
+    queryAll('SELECT * FROM trade_record WHERE account_id = ? ORDER BY traded_at DESC LIMIT 500', [accountId])
+  )
+  ipcMain.handle(IPC.tradeAccountSummary, (_e, accountId: string) => buildAccountSummary(accountId))
+  ipcMain.handle(IPC.tradeSetInitialCash, (_e, req: { accountId: string; cash: number }) => {
+    if (!(req.cash > 0)) throw new Error('初始资金必须为正数')
+    const acc = queryAll<{ config_json: string }>('SELECT config_json FROM account WHERE id = ?', [req.accountId])[0]
+    if (!acc) throw new Error('账户不存在')
+    let cfg: Record<string, unknown> = {}
+    try {
+      cfg = JSON.parse(acc.config_json) as Record<string, unknown>
+    } catch {
+      /* 忽略 */
+    }
+    cfg.initialCash = req.cash
+    run('UPDATE account SET config_json = ?, updated_at = ? WHERE id = ?', [JSON.stringify(cfg), nowIso(), req.accountId])
+    audit({ accountId: req.accountId, actor: 'user', action: 'account.initial_cash.set', detail: { cash: req.cash } })
+  })
 
   // 信号
   ipcMain.handle(IPC.signalList, (_e, accountId: string, limit = 100) =>
     queryAll<Record<string, unknown>>('SELECT * FROM signal WHERE account_id = ? ORDER BY created_at DESC LIMIT ?', [accountId, limit])
   )
   ipcMain.handle(IPC.signalFeedback, (_e, req: SignalFeedbackReq) => {
+    const signal = queryAll<{ account_id: string; code: string; side: string; qty: number; ref_price: number }>('SELECT * FROM signal WHERE id = ?', [
+      req.signalId
+    ])[0]
+    if (!signal) throw new Error('信号不存在')
     run('UPDATE signal SET status = ?, updated_at = ? WHERE id = ?', [req.feedback, nowIso(), req.signalId])
-    const signal = queryAll<{ account_id: string; code: string; side: string; qty: number }>('SELECT * FROM signal WHERE id = ?', [req.signalId])[0]
-    if (signal && req.feedback === 'executed') {
-      // 已执行 → 自动生成成交记录（含费用）
-      const price = req.tradedPrice ?? 0
-      const qty = req.tradedQty ?? signal.qty
-      const amount = price * qty
-      const fee = req.fee ?? calcFee(signal.side as 'buy' | 'sell', amount)
-      run('INSERT INTO trade_record (id, account_id, code, side, price, qty, fee, traded_at, signal_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', [
-        randomUUID(),
-        signal.account_id,
-        signal.code,
-        signal.side,
-        price,
-        qty,
-        fee,
-        nowIso(),
-        req.signalId
-      ])
-      // 更新持仓
-      const pos = queryAll<{ qty: number; cost_price: number }>('SELECT qty, cost_price FROM position WHERE account_id = ? AND code = ?', [signal.account_id, signal.code])[0]
-      if (signal.side === 'buy') {
-        const newQty = (pos?.qty ?? 0) + qty
-        const newCost = pos ? (pos.cost_price * pos.qty + amount + fee) / newQty : (amount + fee) / newQty
-        run(
-          'INSERT INTO position (account_id, code, qty, cost_price, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(account_id, code) DO UPDATE SET qty=excluded.qty, cost_price=excluded.cost_price, updated_at=excluded.updated_at',
-          [signal.account_id, signal.code, newQty, newCost, nowIso()]
-        )
-      } else {
-        const newQty = (pos?.qty ?? 0) - qty
-        if (newQty <= 0) run('DELETE FROM position WHERE account_id = ? AND code = ?', [signal.account_id, signal.code])
-        else run('UPDATE position SET qty = ?, updated_at = ? WHERE account_id = ? AND code = ?', [newQty, nowIso(), signal.account_id, signal.code])
-      }
+    if (req.feedback === 'executed') {
+      // 已执行 → 走资金/持仓/成交记录联动
+      executeTradeOrder({
+        accountId: signal.account_id,
+        code: signal.code,
+        side: signal.side as 'buy' | 'sell',
+        price: req.tradedPrice ?? signal.ref_price,
+        qty: req.tradedQty ?? signal.qty,
+        fee: req.fee,
+        signalId: req.signalId
+      })
+      collectAccountSnapshot(signal.account_id)
     }
     broadcast({ type: 'signal.updated', payload: { signalId: req.signalId, feedback: req.feedback } })
+  })
+
+  // 持仓
+  ipcMain.handle(IPC.positionList, (_e, accountId: string) => queryAll('SELECT * FROM position WHERE account_id = ?', [accountId]))
+  ipcMain.handle(IPC.positionUpsert, (_e, req: { accountId: string; code: string; qty: number; costPrice: number }) => {
+    if (req.qty <= 0) run('DELETE FROM position WHERE account_id = ? AND code = ?', [req.accountId, req.code])
+    else
+      run(
+        'INSERT INTO position (account_id, code, qty, cost_price, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(account_id, code) DO UPDATE SET qty=excluded.qty, cost_price=excluded.cost_price, updated_at=excluded.updated_at',
+        [req.accountId, req.code, req.qty, req.costPrice, nowIso()]
+      )
+    audit({ accountId: req.accountId, actor: 'user', action: 'position.upsert', target: req.code, detail: { qty: req.qty, costPrice: req.costPrice } })
+    collectAccountSnapshot(req.accountId)
   })
 
   // 预警
@@ -264,7 +580,7 @@ export function registerIpcHandlers(): void {
     return { running: false }
   })
 
-  // 汇报（待决策中心）
+  // 汇报（待决策，首页右列）
   ipcMain.handle(IPC.reportList, (_e, accountId: string) =>
     queryAll<Record<string, unknown>>('SELECT * FROM report WHERE account_id = ? ORDER BY created_at DESC LIMIT 200', [accountId])
   )
@@ -272,132 +588,53 @@ export function registerIpcHandlers(): void {
     const report = queryAll<{ account_id: string; decision_json: string; status: string; level: string }>('SELECT * FROM report WHERE id = ?', [req.reportId])[0]
     if (!report) throw new Error('汇报不存在')
     const decision = req.decision === 'approved' ? 'approved' : req.decision === 'postponed' ? 'postponed' : 'rejected'
-    run('UPDATE report SET status = ?, updated_at = ? WHERE id = ?', [decision, nowIso(), req.reportId])
-    audit({ accountId: report.account_id, actor: 'user', action: 'report.respond', target: req.reportId, detail: { decision, note: req.note } })
-    // 批准后的动作：激活策略 / 纠正执行
-    if (decision === 'approved' && report.decision_json) {
-      try {
-        const d = JSON.parse(report.decision_json) as { kind?: string; strategyId?: string; alertId?: string }
-        if (d.kind === 'activate' && d.strategyId) {
-          runnerPipeline.activateStrategy(report.account_id, { strategyId: d.strategyId }).catch((e) => logger.error(`[ipc] activate failed: ${(e as Error).message}`))
-        } else if (d.kind === 'correct_pause' && d.strategyId) {
-          run("UPDATE strategy SET status = 'paused', updated_at = ? WHERE id = ?", [nowIso(), d.strategyId])
-          audit({ accountId: report.account_id, actor: 'user', action: 'correction.paused', target: d.strategyId })
-        } else if (d.kind === 'correct_retire' && d.strategyId) {
-          runnerPipeline.deactivateStrategy(report.account_id, d.strategyId, '纠正淘汰（人工批准）')
-        } else if (d.kind === 'alert') {
-          run('UPDATE alert SET status = ? WHERE id = ?', ['acknowledged', String(d.alertId)])
-        }
-      } catch (e) {
-        logger.warn(`[ipc] report decision action failed: ${(e as Error).message}`)
-      }
-    }
+    applyReportDecision({ reportId: req.reportId, accountId: report.account_id, decisionJson: report.decision_json, decision, actor: 'user', note: req.note })
     broadcast({ type: 'agent.report', payload: { reportId: req.reportId, decision } })
   })
 
-  // 绩效
-  ipcMain.handle(IPC.perfGetSnapshot, (_e, accountId: string) => {
-    const snapshots = queryAll<{ date: string; total_assets: number; cash: number }>(
-      'SELECT date, total_assets, cash FROM account_snapshot WHERE account_id = ? ORDER BY date ASC',
-      [accountId]
-    )
-    const metrics = computeSnapshotMetrics(snapshots.map((s) => ({ date: s.date, totalAssets: s.total_assets })))
-    return snapshots.map((s) => ({ ...s, date: s.date })).concat([{ metrics }] as never)
-  })
-  ipcMain.handle(IPC.perfGetCharts, (_e, accountId: string) => {
-    const snapshots = queryAll<{ date: string; total_assets: number }>(
-      'SELECT date, total_assets FROM account_snapshot WHERE account_id = ? ORDER BY date ASC',
-      [accountId]
-    )
-    const signals = queryAll<{ status: string }>('SELECT status FROM signal WHERE account_id = ?', [accountId])
-    const trades = queryAll<Record<string, unknown>>('SELECT * FROM trade_record WHERE account_id = ?', [accountId])
-    const deviation = computeSignalDeviation(signals)
-    const stats = computeTradeStats(trades as never)
-    return {
-      equity: snapshots.map((s) => [s.date, s.total_assets]),
-      metrics: computeSnapshotMetrics(snapshots.map((s) => ({ date: s.date, totalAssets: s.total_assets }))),
-      deviation,
-      tradeStats: stats
-    }
-  })
-
-  // 复盘
-  ipcMain.handle(IPC.reviewList, (_e, accountId: string) => queryAll('SELECT * FROM review_report WHERE account_id = ? ORDER BY created_at DESC LIMIT 100', [accountId]))
-  ipcMain.handle(IPC.reviewGetReport, (_e, id: string) => queryAll('SELECT * FROM review_report WHERE id = ?', [id])[0])
-
-  // 持仓与成交
-  ipcMain.handle(IPC.positionList, (_e, accountId: string) => queryAll('SELECT * FROM position WHERE account_id = ?', [accountId]))
-  ipcMain.handle(IPC.positionUpsert, (_e, req: { accountId: string; code: string; qty: number; costPrice: number }) => {
-    if (req.qty <= 0) run('DELETE FROM position WHERE account_id = ? AND code = ?', [req.accountId, req.code])
-    else
-      run(
-        'INSERT INTO position (account_id, code, qty, cost_price, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(account_id, code) DO UPDATE SET qty=excluded.qty, cost_price=excluded.cost_price, updated_at=excluded.updated_at',
-        [req.accountId, req.code, req.qty, req.costPrice, nowIso()]
-      )
-  })
-  ipcMain.handle(IPC.tradeList, (_e, accountId: string) => queryAll('SELECT * FROM trade_record WHERE account_id = ? ORDER BY traded_at DESC LIMIT 200', [accountId]))
-  ipcMain.handle(IPC.tradeCreate, (_e, req: { accountId: string; code: string; side: 'buy' | 'sell'; price: number; qty: number; fee: number; tradedAt: string; note?: string }) => {
-    run('INSERT INTO trade_record (id, account_id, code, side, price, qty, fee, traded_at, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', [
-      randomUUID(),
-      req.accountId,
-      req.code,
-      req.side,
-      req.price,
-      req.qty,
-      req.fee,
-      req.tradedAt || nowIso(),
-      req.note ?? null
-    ])
-  })
-
-  // 运行实例
-  ipcMain.handle('runs:list', (_e, accountId: string) =>
-    queryAll('SELECT ri.*, s.name as strategy_name FROM run_instance ri LEFT JOIN strategy s ON s.id = ri.strategy_id WHERE s.account_id = ?', [accountId])
-  )
-
-  // 审计
-  ipcMain.handle(IPC.auditList, (_e, accountId: string, limit = 200) =>
-    queryAll('SELECT * FROM audit_log WHERE account_id = ? ORDER BY id DESC LIMIT ?', [accountId, limit])
-  )
-  ipcMain.handle(IPC.eventList, (_e, accountId: string, limit = 200) =>
-    queryAll('SELECT * FROM event_log WHERE account_id = ? ORDER BY id DESC LIMIT ?', [accountId, limit])
-  )
-
-  // 对话
+  // 对话流
   ipcMain.handle(IPC.chatSend, (_e, req: { accountId: string; message: string }) => {
+    const message = req.message?.trim()
+    if (!message) throw new Error('消息不能为空')
+    // 用户消息写入对话流
+    addChatMessage({ accountId: req.accountId, role: 'user', content: message })
     const item = createWorkItem({
       accountId: req.accountId,
       type: 'user_request',
       priority: 'high',
-      context: { message: req.message }
+      context: { message }
     })
-    audit({ accountId: req.accountId, actor: 'user', action: 'chat.send', target: item.id, detail: { message: req.message.slice(0, 200) } })
+    audit({ accountId: req.accountId, actor: 'user', action: 'chat.send', target: item.id, detail: { message: message.slice(0, 200) } })
     return { accepted: true, workItemId: item.id }
   })
+  ipcMain.handle(IPC.chatList, (_e, req: { accountId: string; limit?: number; before?: { createdAt: string; rowid: number }; after?: { createdAt: string; rowid: number } }) =>
+    listChatMessages(req.accountId, { limit: req.limit ?? 100, before: req.before, after: req.after })
+  )
+
+  // 事件流水（规划页）
+  ipcMain.handle(IPC.eventList, (_e, accountId: string, limit = 200) =>
+    queryAll('SELECT id, type, payload_json as payloadJson, occurred_at as occurredAt FROM event_log WHERE account_id = ? ORDER BY id DESC LIMIT ?', [
+      accountId,
+      limit
+    ])
+  )
 
   logger.info('[ipc] handlers registered')
 }
 
-// ---------- 账户快照采集（绩效输入） ----------
+// ---------- 账户快照采集（资金统计输入） ----------
 export function collectAccountSnapshot(accountId: string): void {
   try {
-    const positions = queryAll<{ code: string; qty: number; cost_price: number }>('SELECT code, qty, cost_price FROM position WHERE account_id = ?', [accountId])
-    let marketValue = 0
-    for (const p of positions) {
-      const row = getDb().prepare('SELECT price FROM market_quote WHERE code = ?').get(p.code) as { price: number } | undefined
-      marketValue += p.qty * (row?.price ?? p.cost_price)
-    }
-    const last = queryAll<{ total_assets: number; cash: number }>('SELECT total_assets, cash FROM account_snapshot WHERE account_id = ? ORDER BY date DESC LIMIT 1', [accountId])[0]
-    const totalAssets = marketValue + (last?.cash ?? 100_000)
+    const summary = buildAccountSummary(accountId)
     const today = new Date().toISOString().slice(0, 10)
     run(
-      'INSERT INTO account_snapshot (account_id, date, total_assets, cash, positions_json) VALUES (?, ?, ?, ?, ?) ON CONFLICT(account_id, date) DO UPDATE SET total_assets=excluded.total_assets, positions_json=excluded.positions_json',
-      [accountId, today, totalAssets, last?.cash ?? 100_000, JSON.stringify(positions)]
+      'INSERT INTO account_snapshot (account_id, date, total_assets, cash, positions_json) VALUES (?, ?, ?, ?, ?) ON CONFLICT(account_id, date) DO UPDATE SET total_assets=excluded.total_assets, cash=excluded.cash, positions_json=excluded.positions_json',
+      [accountId, today, summary.totalAssets, summary.cash, JSON.stringify(summary.positions)]
     )
   } catch (e) {
     logger.warn(`[snapshot] collect failed: ${(e as Error).message}`)
   }
 }
 
-export { dataTaskState, safeStorage }
+export { dataTaskState, safeStorage, formatReportContent }
 export type { Report, Signal, Strategy }

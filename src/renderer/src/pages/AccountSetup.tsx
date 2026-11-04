@@ -3,10 +3,12 @@
  */
 import { useState } from 'react'
 import { Card, Input, Button, Typography, message } from 'antd'
+import { useAntdToken } from 'antd-style'
 import { useAppStore } from '../stores'
 
 export default function AccountSetup(): React.ReactNode {
   const { init } = useAppStore()
+  const token = useAntdToken()
   const [name, setName] = useState('')
   const [submitting, setSubmitting] = useState(false)
 
@@ -34,12 +36,12 @@ export default function AccountSetup(): React.ReactNode {
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
-        background: '#0f1115'
+        background: token.colorBgLayout
       }}
     >
       <Card style={{ width: 420 }} title="欢迎使用 Daydream">
         <Typography.Paragraph type="secondary">
-          使用前需要先创建一个本地账户（无需登录）。账户用于隔离资金与持仓数据；行情数据、策略与模型配置为全局通用。
+          使用前需要先创建一个本地账户（无需登录）。账户用于隔离资金与持仓数据，每账户唯一一份策略；行情数据与模型配置为全局通用。
         </Typography.Paragraph>
         <Input
           placeholder="账户名称（如：实盘 A、研究账户）"

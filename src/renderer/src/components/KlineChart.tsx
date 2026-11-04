@@ -1,8 +1,10 @@
 /**
  * K 线图（lightweight-charts）：日线蜡烛图 + 均线叠加。
+ * 图表颜色统一使用 antd token。
  */
 import { useEffect, useRef } from 'react'
 import { createChart, ColorType, type IChartApi } from 'lightweight-charts'
+import { useAntdToken } from 'antd-style'
 import type { Bar } from '@shared/types'
 
 interface Props {
@@ -11,6 +13,7 @@ interface Props {
 }
 
 export default function KlineChart({ bars, height = 420 }: Props): React.ReactNode {
+  const token = useAntdToken()
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
 
@@ -18,20 +21,20 @@ export default function KlineChart({ bars, height = 420 }: Props): React.ReactNo
     if (!containerRef.current) return
     const chart = createChart(containerRef.current, {
       height,
-      layout: { background: { type: ColorType.Solid, color: 'transparent' }, textColor: '#8c93a3' },
+      layout: { background: { type: ColorType.Solid, color: 'transparent' }, textColor: token.colorTextSecondary },
       grid: {
-        vertLines: { color: '#1f242c' },
-        horzLines: { color: '#1f242c' }
+        vertLines: { color: token.colorBorderSecondary },
+        horzLines: { color: token.colorBorderSecondary }
       },
-      timeScale: { borderColor: '#2a303a' }
+      timeScale: { borderColor: token.colorBorder }
     })
     chartRef.current = chart
     const candle = chart.addCandlestickSeries({
-      upColor: '#e0564b',
-      downColor: '#2e9e63',
+      upColor: token.colorError,
+      downColor: token.colorSuccess,
       borderVisible: false,
-      wickUpColor: '#e0564b',
-      wickDownColor: '#2e9e63'
+      wickUpColor: token.colorError,
+      wickDownColor: token.colorSuccess
     })
     const data = bars.map((b) => ({
       time: b.date,
@@ -54,8 +57,8 @@ export default function KlineChart({ bars, height = 420 }: Props): React.ReactNo
       })
       ma.setData(values)
     }
-    addMa(5, '#d9b64a')
-    addMa(20, '#4a90d9')
+    addMa(5, token.colorWarning)
+    addMa(20, token.colorPrimary)
     chart.timeScale().fitContent()
 
     const handleResize = (): void => {
@@ -67,7 +70,7 @@ export default function KlineChart({ bars, height = 420 }: Props): React.ReactNo
       chart.remove()
       chartRef.current = null
     }
-  }, [bars, height])
+  }, [bars, height, token])
 
   return <div ref={containerRef} style={{ width: '100%' }} />
 }

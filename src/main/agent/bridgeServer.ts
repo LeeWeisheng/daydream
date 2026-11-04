@@ -99,19 +99,31 @@ function baseOptions(usePro: boolean): Record<string, unknown> {
   }
 }
 
-async function runQuery(prompt: string, options: Record<string, unknown>): Promise<{ result: string; structuredOutput?: unknown; modelUsage?: unknown }> {
+async function runQuery(
+  prompt: string,
+  options: Record<string, unknown>,
+  trace: { accountId: string; workItemId?: string; purpose: string }
+): Promise<{ result: string; structuredOutput?: unknown; modelUsage?: unknown }> {
   const sdkMod = await loadSdk()
   const q = sdkMod.query({ prompt, options: options as never })
   let last: { result: string; structuredOutput?: unknown; modelUsage?: unknown } | null = null
   for await (const msg of q) {
-    if (msg.type !== 'result') continue
-    const m = msg as { subtype?: string; result?: string; structured_output?: unknown; modelUsage?: unknown; errors?: unknown[] }
-    if (m.subtype === 'success') {
-      last = { result: m.result ?? '', structuredOutput: m.structured_output, modelUsage: m.modelUsage }
-    } else {
-      const detail = m.result ?? (m.errors ?? []).map((e) => JSON.stringify(e)).join('; ')
-      throw new Error(`Claude Agent 执行失败: ${detail || '未知错误'}`)
+    if (msg.type === 'result') {
+      const m = msg as { subtype?: string; result?: string; structured_output?: unknown; modelUsage?: unknown; errors?: unknown[] }
+      if (m.subtype === 'success') {
+        last = { result: m.result ?? '', structuredOutput: m.structured_output, modelUsage: m.modelUsage }
+      } else {
+        const detail = m.result ?? (m.errors ?? []).map((e) => JSON.stringify(e)).join('; ')
+        throw new Error(`Claude Agent 执行失败: ${detail || '未知错误'}`)
+      }
+      continue
     }
+    // 转发全部消息给主进程记录（stream_event 增量流等高频噪声除外）
+    if (msg.type === 'stream_event') continue
+    send({
+      method: 'agentMessage',
+      params: { accountId: trace.accountId, workItemId: trace.workItemId, purpose: trace.purpose, msg }
+    })
   }
   if (!last) throw new Error('Claude Agent 无结果返回')
   return last
@@ -128,12 +140,16 @@ async function handleRequest(req: RpcRequest): Promise<void> {
       }
       case 'structuredOutput': {
         const p = req.params
-        const result = await runQuery(String(p.prompt), {
-          ...baseOptions(Boolean(p.useProModel)),
-          systemPrompt: String(p.system),
-          outputFormat: { type: 'json_schema', schema: p.jsonSchema },
-          maxTurns: 4
-        })
+        const result = await runQuery(
+          String(p.prompt),
+          {
+            ...baseOptions(Boolean(p.useProModel)),
+            systemPrompt: String(p.system),
+            outputFormat: { type: 'json_schema', schema: p.jsonSchema },
+            maxTurns: 4
+          },
+          { accountId: String(p.accountId ?? ''), workItemId: p.workItemId ? String(p.workItemId) : undefined, purpose: String(p.purpose ?? 'structured') }
+        )
         send({ id: req.id, ok: true, data: { structuredOutput: result.structuredOutput, result: result.result, modelUsage: result.modelUsage } })
         return
       }
@@ -146,13 +162,17 @@ async function handleRequest(req: RpcRequest): Promise<void> {
           instructions: 'Daydream 业务工具集：市场数据、策略管理、回测、风控、信号、预警、汇报与联网搜索。',
           tools: buildTools()
         })
-        const result = await runQuery(String(p.prompt), {
-          ...baseOptions(Boolean(p.useProModel)),
-          systemPrompt: String(p.system),
-          mcpServers: { daydream: server },
-          allowedTools: TOOL_SCHEMAS.map((t) => `mcp__daydream__${t.name}`),
-          maxTurns: Number(p.maxSteps ?? 12)
-        })
+        const result = await runQuery(
+          String(p.prompt),
+          {
+            ...baseOptions(Boolean(p.useProModel)),
+            systemPrompt: String(p.system),
+            mcpServers: { daydream: server },
+            allowedTools: TOOL_SCHEMAS.map((t) => `mcp__daydream__${t.name}`),
+            maxTurns: Number(p.maxSteps ?? 12)
+          },
+          { accountId: String(p.accountId ?? ''), workItemId: p.workItemId ? String(p.workItemId) : undefined, purpose: String(p.purpose ?? 'agent_turn') }
+        )
         send({ id: req.id, ok: true, data: { result: result.result, modelUsage: result.modelUsage } })
         return
       }

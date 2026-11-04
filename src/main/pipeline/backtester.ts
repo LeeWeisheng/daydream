@@ -29,6 +29,7 @@ export async function runBacktestWorkItem(accountId: string, context: Record<str
   const strategyRow = queryAll<Strategy & Record<string, unknown>>('SELECT * FROM strategy WHERE id = ?', [strategyId])[0]
   if (!strategyRow) throw new Error(`策略不存在: ${strategyId}`)
   const strategy = { ...strategyRow, dsl_json: String(strategyRow.dsl_json ?? '') }
+  if (!strategy.dsl_json.trim()) throw new Error('策略 Markdown 中无可执行的 ```dsl 代码块，无法回测')
   const { dsl, errors } = parseAndValidateDsl(strategy.dsl_json)
   if (!dsl || errors.length > 0) throw new Error(`策略 DSL 非法: ${errors.join('; ')}`)
 
@@ -144,7 +145,9 @@ export async function startBacktestTask(accountId: string, strategyVersionId: st
       // 策略全局共享：查询不按账户过滤
       const strategyRow = queryAll<Strategy & Record<string, unknown>>('SELECT * FROM strategy WHERE id = ?', [version.strategy_id])[0]
       if (!strategyRow) throw new Error('策略不存在')
-      const { dsl, errors } = parseAndValidateDsl(String(strategyRow.dsl_json ?? ''))
+      const dslJson = String(strategyRow.dsl_json ?? '')
+      if (!dslJson.trim()) throw new Error('策略 Markdown 中无可执行的 ```dsl 代码块，无法回测')
+      const { dsl, errors } = parseAndValidateDsl(dslJson)
       if (!dsl) throw new Error(errors.join('; '))
       const klines = queryAll<Parameters<typeof runBacktest>[1][number]>(
         'SELECT code, date, open, high, low, close, volume, amount, adj_factor as adjFactor FROM kline_daily WHERE date >= ? AND date <= ?',

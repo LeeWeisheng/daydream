@@ -6,6 +6,7 @@
  * 结构化输出经 outputFormat(json_schema) + Zod 校验，失败自动重试；调用统计进审计。
  */
 import { z } from 'zod'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { zodToJsonSchema } from 'zod-to-json-schema'
 import { auditLlmCall } from '../services/audit'
 import { logger } from '../services/logger'
@@ -13,6 +14,12 @@ import { bridgeStructuredOutput, bridgeAgentTurn } from './llmBridge'
 import { getModelConfig } from './modelConfig'
 
 export { getModelConfig }
+
+/**
+ * LLM 调用追踪上下文：工作项执行时注入，消息流按工作项分组折叠。
+ * AsyncLocalStorage 在 await 链中传播，保证并发工作项各归其组。
+ */
+export const llmTraceContext = new AsyncLocalStorage<{ workItemId?: string; sessionId?: string }>()
 
 export class LlmUnavailableError extends Error {
   constructor(message: string) {
@@ -45,6 +52,7 @@ export async function structuredOutput<T>(
 ): Promise<T> {
   const jsonSchema = zodToJsonSchema(opts.schema) as Record<string, unknown>
   const attempts = opts.retries ?? 2
+  const trace = llmTraceContext.getStore()
   let lastError: Error | null = null
   for (let attempt = 0; attempt <= attempts; attempt++) {
     try {
@@ -54,7 +62,8 @@ export async function structuredOutput<T>(
         prompt: opts.prompt,
         jsonSchema,
         purpose: opts.purpose,
-        useProModel: opts.useProModel
+        useProModel: opts.useProModel,
+        workItemId: trace?.workItemId
       })
       auditLlmCall(accountId, 'structured', opts.purpose, result.modelUsage, true)
       // structured_output 为主，result 文本 JSON 兜底
@@ -84,6 +93,7 @@ export async function runAgentTurn(
     useProModel?: boolean
   }
 ): Promise<string> {
+  const trace = llmTraceContext.getStore()
   try {
     const result = await bridgeAgentTurn({
       accountId,
@@ -91,7 +101,8 @@ export async function runAgentTurn(
       prompt: opts.prompt,
       purpose: opts.purpose,
       maxSteps: opts.maxSteps,
-      useProModel: opts.useProModel
+      useProModel: opts.useProModel,
+      workItemId: trace?.workItemId
     })
     auditLlmCall(accountId, 'agent', opts.purpose, result.modelUsage, true)
     return result.result

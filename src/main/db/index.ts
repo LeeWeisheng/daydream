@@ -9,6 +9,8 @@ import { randomUUID } from 'node:crypto'
 import { logger } from '../services/logger'
 import { audit, initAudit } from '../services/audit'
 import { DEFAULT_RISK_RULES } from '../risk/engine'
+import { DEFAULT_INITIAL_CASH, DEFAULT_PREFERENCES, emptyDslTemplate } from '@shared/constants'
+import { markdownFromDsl, type StrategyDSL } from '@shared/strategy/schema'
 
 let db: Database.Database | null = null
 
@@ -222,6 +224,52 @@ CREATE TABLE IF NOT EXISTS account_snapshot (
   UNIQUE(account_id, date)
 );
 `
+  },
+  {
+    // v2：本次重构——每账户唯一策略（含用户偏好）、账户资金、对话流
+    version: 2,
+    sql: `
+ALTER TABLE strategy ADD COLUMN preferences_json TEXT NOT NULL DEFAULT '{}';
+ALTER TABLE account ADD COLUMN cash REAL NOT NULL DEFAULT ${DEFAULT_INITIAL_CASH};
+
+CREATE TABLE IF NOT EXISTS chat_message (
+  id TEXT PRIMARY KEY, account_id TEXT NOT NULL, role TEXT NOT NULL,
+  content TEXT NOT NULL, report_id TEXT, report_level TEXT, report_status TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_chat_message_account ON chat_message(account_id, created_at);
+
+-- 存量策略：每账户保留最新一份，其余删除（其历史版本仍保留于 strategy_version）
+DELETE FROM strategy WHERE id IN (
+  SELECT s1.id FROM strategy s1 JOIN strategy s2 ON s2.account_id = s1.account_id
+  WHERE s2.updated_at > s1.updated_at
+     OR (s2.updated_at = s1.updated_at AND s2.version > s1.version)
+     OR (s2.updated_at = s1.updated_at AND s2.version = s1.version AND s2.id > s1.id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_strategy_account ON strategy(account_id);
+
+-- 存量策略回填默认偏好
+UPDATE strategy SET preferences_json = '${JSON.stringify(DEFAULT_PREFERENCES).replace(/'/g, "''")}' WHERE preferences_json = '{}';
+`
+  },
+  {
+    // v3：对话流适配 Claude Code 全部消息格式（kind/meta/工作项/会话关联，运行细节折叠）
+    version: 3,
+    sql: `
+ALTER TABLE chat_message ADD COLUMN kind TEXT NOT NULL DEFAULT 'text';
+ALTER TABLE chat_message ADD COLUMN meta_json TEXT;
+ALTER TABLE chat_message ADD COLUMN work_item_id TEXT;
+ALTER TABLE chat_message ADD COLUMN session_id TEXT;
+CREATE INDEX IF NOT EXISTS idx_chat_message_workitem ON chat_message(work_item_id, created_at);
+`
+  },
+  {
+    // v4：策略改 Markdown 文档（markdown 为主载体，内嵌 ```dsl 代码块同步 dsl_json）
+    version: 4,
+    sql: `
+ALTER TABLE strategy ADD COLUMN markdown TEXT NOT NULL DEFAULT '';
+ALTER TABLE strategy_version ADD COLUMN markdown TEXT NOT NULL DEFAULT '';
+`
   }
 ]
 
@@ -258,7 +306,11 @@ function migrate(conn: Database.Database): void {
 /** 默认数据：风控规则（账户创建时按需播种；不再自动创建默认账户——用户必须先创建账户） */
 function seedDefaults(): void {
   if (!db) return
-  // 风控规则播种移至账户创建时（seedRiskRulesForAccount）
+  // 存量账户补默认策略（v2 迁移后：每账户唯一一份策略）
+  const accounts = queryAll<{ id: string; name: string }>('SELECT id, name FROM account')
+  for (const a of accounts) {
+    ensureStrategyForAccount(a.id, a.name)
+  }
 }
 
 /** 为新账户播种默认风控规则 */
@@ -270,6 +322,26 @@ export function seedRiskRulesForAccount(accountId: string): void {
   for (const [key, params] of Object.entries(DEFAULT_RISK_RULES)) {
     if (!existing.has(key)) insert.run(accountId, key, JSON.stringify(params))
   }
+}
+
+/** 确保账户存在唯一策略（无则创建默认 draft：默认偏好 + Markdown 模板） */
+export function ensureStrategyForAccount(accountId: string, accountName: string): void {
+  if (!db) return
+  const existing = db.prepare('SELECT id FROM strategy WHERE account_id = ?').get(accountId)
+  if (existing) return
+  const now = nowIso()
+  const strategyId = randomUUID()
+  const versionId = randomUUID()
+  const dsl = emptyDslTemplate(`${accountName} 的策略`)
+  const dslJson = JSON.stringify(dsl)
+  const markdown = markdownFromDsl(`${accountName} 的策略`, dsl as unknown as StrategyDSL)
+  const prefs = JSON.stringify(DEFAULT_PREFERENCES)
+  db.prepare(
+    "INSERT INTO strategy (id, account_id, name, version, dsl_json, markdown, preferences_json, status, created_by, rationale, created_at, updated_at) VALUES (?, ?, ?, 1, ?, ?, ?, 'draft', 'system', '', ?, ?)"
+  ).run(strategyId, accountId, `${accountName} 的策略`, dslJson, markdown, prefs, now, now)
+  db.prepare(
+    'INSERT INTO strategy_version (id, strategy_id, version, dsl_json, markdown, change_log, created_at) VALUES (?, ?, 1, ?, ?, ?, ?)'
+  ).run(versionId, strategyId, dslJson, markdown, '初始版本（系统播种）', now)
 }
 
 /** 获取数据库连接（必须在 openDatabase 后调用） */
@@ -310,19 +382,16 @@ export function ensureAccount(accountId?: string): { id: string } | undefined {
   return first
 }
 
-/** 创建账户（播种风控规则，审计留痕） */
+/** 创建账户（播种风控规则与唯一默认策略，审计留痕） */
 export function createAccount(name: string): { id: string; name: string } {
   const id = randomUUID()
   const now = nowIso()
-  run('INSERT INTO account (id, name, config_json, autonomy_level, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)', [
-    id,
-    name,
-    '{}',
-    'conservative',
-    now,
-    now
-  ])
+  run(
+    'INSERT INTO account (id, name, config_json, autonomy_level, cash, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    [id, name, JSON.stringify({ initialCash: DEFAULT_INITIAL_CASH }), 'conservative', DEFAULT_INITIAL_CASH, now, now]
+  )
   seedRiskRulesForAccount(id)
+  ensureStrategyForAccount(id, name)
   audit({ accountId: id, actor: 'user', action: 'account.create', target: id })
   return { id, name }
 }

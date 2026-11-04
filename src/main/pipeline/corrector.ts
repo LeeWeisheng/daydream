@@ -12,7 +12,7 @@ import { structuredOutput } from '../agent/llm'
 import { CORRECTOR_PROMPT, SYSTEM_IDENTITY } from '../agent/prompts'
 import { agentEventBus } from '../agent/events'
 import { createWorkItem } from '../agent/workitem'
-import { parseAndValidateDsl, validateStrategyDsl } from '@shared/strategy/schema'
+import { parseAndValidateDsl, validateStrategyDsl, upsertDslBlockInMarkdown } from '@shared/strategy/schema'
 import { runBacktest, DEFAULT_BACKTEST_PARAMS } from '../backtest/engine'
 import { shanghaiDateStr, addDays } from '@shared/constants'
 
@@ -25,15 +25,15 @@ const correctionSchema = z.object({
 
 export async function run(accountId: string, context: Record<string, unknown>): Promise<Record<string, unknown>> {
   const strategyId = String(context.strategyId ?? '')
-  const strategy = queryAll<{ id: string; name: string; dsl_json: string; status: string }>(
-    'SELECT id, name, dsl_json, status FROM strategy WHERE id = ?',
+  const strategy = queryAll<{ id: string; name: string; dsl_json: string; markdown: string; status: string }>(
+    'SELECT id, name, dsl_json, markdown, status FROM strategy WHERE id = ?',
     [strategyId]
   )[0]
   if (!strategy) throw new Error(`策略不存在: ${strategyId}`)
 
   const prompt = JSON.stringify(
     {
-      strategy: { id: strategy.id, name: strategy.name, status: strategy.status, dsl: JSON.parse(strategy.dsl_json) },
+      strategy: { id: strategy.id, name: strategy.name, status: strategy.status, markdown: strategy.markdown, dsl: safeParseDsl(strategy.dsl_json) },
       suggestion: context.suggestion ?? '',
       evidence: context.evidence ?? ''
     },
@@ -91,15 +91,17 @@ export async function run(accountId: string, context: Record<string, unknown>): 
           ])
           return { strategyId, applied: false, reason }
         }
-        // 新版本留档并替换
+        // 新版本留档并替换（dsl_json 与 markdown 的 ```dsl 块同步更新，保留手写内容）
         const current = queryAll<{ version: number }>('SELECT version FROM strategy WHERE id = ?', [strategyId])[0]
         const next = (current?.version ?? 0) + 1
-        dbRun('UPDATE strategy SET dsl_json = ?, version = ?, updated_at = ? WHERE id = ?', [newDslJson, next, nowIso(), strategyId])
-        dbRun('INSERT INTO strategy_version (id, strategy_id, version, dsl_json, change_log, created_at) VALUES (?, ?, ?, ?, ?, ?)', [
+        const newMarkdown = upsertDslBlockInMarkdown(strategy.markdown, dsl)
+        dbRun('UPDATE strategy SET dsl_json = ?, markdown = ?, version = ?, updated_at = ? WHERE id = ?', [newDslJson, newMarkdown, next, nowIso(), strategyId])
+        dbRun('INSERT INTO strategy_version (id, strategy_id, version, dsl_json, markdown, change_log, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)', [
           `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
           strategyId,
           next,
           newDslJson,
+          newMarkdown,
           `纠正（${correction.action}）: ${correction.reasoning}`,
           nowIso()
         ])
@@ -135,6 +137,14 @@ export async function run(accountId: string, context: Record<string, unknown>): 
       }
       return requestApproval(accountId, strategyId, correction, 'retire')
     }
+  }
+}
+
+function safeParseDsl(dslJson: string): unknown {
+  try {
+    return JSON.parse(dslJson)
+  } catch {
+    return null
   }
 }
 

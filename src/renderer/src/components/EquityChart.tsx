@@ -1,8 +1,10 @@
 /**
  * 绩效净值曲线（ECharts）：净值序列对比基准（沪深 300）。
+ * 图表颜色统一使用 antd token。
  */
 import { useEffect, useRef } from 'react'
 import * as echarts from 'echarts'
+import { useAntdToken } from 'antd-style'
 
 interface Point {
   date: string
@@ -16,6 +18,7 @@ interface Props {
 }
 
 export default function EquityChart({ points, height = 320 }: Props): React.ReactNode {
+  const token = useAntdToken()
   const ref = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -27,19 +30,19 @@ export default function EquityChart({ points, height = 320 }: Props): React.Reac
     chart.setOption({
       backgroundColor: 'transparent',
       tooltip: { trigger: 'axis' },
-      legend: { data: ['策略净值', '基准（沪深300）'], textStyle: { color: '#8c93a3' } },
+      legend: { data: ['策略净值', '基准（沪深300）'], textStyle: { color: token.colorTextSecondary } },
       grid: { left: 50, right: 16, top: 36, bottom: 28 },
       xAxis: {
         type: 'category',
         data: points.map((p) => p.date),
-        axisLine: { lineStyle: { color: '#2a303a' } },
-        axisLabel: { color: '#8c93a3' }
+        axisLine: { lineStyle: { color: token.colorBorder } },
+        axisLabel: { color: token.colorTextSecondary }
       },
       yAxis: {
         type: 'value',
         scale: true,
-        axisLabel: { color: '#8c93a3' },
-        splitLine: { lineStyle: { color: '#1f242c' } }
+        axisLabel: { color: token.colorTextSecondary },
+        splitLine: { lineStyle: { color: token.colorBorderSecondary } }
       },
       series: [
         {
@@ -47,7 +50,7 @@ export default function EquityChart({ points, height = 320 }: Props): React.Reac
           type: 'line',
           data: points.map((p) => Math.round((p.equity / base) * 1000) / 1000),
           showSymbol: false,
-          lineStyle: { color: '#1677ff', width: 1.5 },
+          lineStyle: { color: token.colorPrimary, width: 1.5 },
           areaStyle: { color: 'rgba(22,119,255,0.08)' }
         },
         {
@@ -55,7 +58,7 @@ export default function EquityChart({ points, height = 320 }: Props): React.Reac
           type: 'line',
           data: points.map((p) => Math.round((p.benchmark / benchBase) * 1000) / 1000),
           showSymbol: false,
-          lineStyle: { color: '#8c93a3', width: 1 }
+          lineStyle: { color: token.colorTextSecondary, width: 1 }
         }
       ]
     })
@@ -65,7 +68,7 @@ export default function EquityChart({ points, height = 320 }: Props): React.Reac
       window.removeEventListener('resize', handleResize)
       chart.dispose()
     }
-  }, [points, height])
+  }, [points, height, token])
 
   return <div ref={ref} style={{ width: '100%', height }} />
 }
