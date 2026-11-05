@@ -27,10 +27,41 @@ interface ModelCfg {
 
 let modelCfg: ModelCfg | null = null
 let sdk: typeof import('@anthropic-ai/claude-agent-sdk') | null = null
+/** 在途 query 的中止句柄（父进程退出 / 停止运行时立即中断模型请求） */
+let currentAbort: AbortController | null = null
+/** 已关闭：不再接受新请求、不再向父进程写消息 */
+let closed = false
+
+/**
+ * 关闭桥接：中止在途模型请求并退出。
+ * 触发场景：父进程（Electron 主进程）退出导致 stdin EOF / 父进程消失 / 收到 SIGTERM。
+ * 这是"应用退出后不得再有模型请求"的子进程侧兜底。
+ */
+function shutdown(reason: string, code = 0): void {
+  if (closed) return
+  closed = true
+  try {
+    process.stderr.write(`[bridge] shutdown: ${reason}\n`)
+  } catch {
+    /* 父进程已退出，管道不可写 */
+  }
+  currentAbort?.abort()
+  // 给 SDK 一点时间终止其 cli 子进程，再强制退出（不再等待任何网络响应）
+  setTimeout(() => process.exit(code), 200).unref()
+}
 
 function send(msg: Record<string, unknown>): void {
-  process.stdout.write(JSON.stringify(msg) + '\n')
+  if (closed) return
+  try {
+    process.stdout.write(JSON.stringify(msg) + '\n')
+  } catch {
+    shutdown('stdout 写入失败（父进程已退出）')
+  }
 }
+
+process.on('SIGTERM', () => shutdown('SIGTERM'))
+process.on('SIGINT', () => shutdown('SIGINT'))
+process.stdout.on('error', () => shutdown('stdout EPIPE'))
 
 async function loadSdk(): Promise<typeof import('@anthropic-ai/claude-agent-sdk')> {
   if (!sdk) sdk = await import('@anthropic-ai/claude-agent-sdk')
@@ -104,6 +135,21 @@ async function runQuery(
   options: Record<string, unknown>,
   trace: { accountId: string; workItemId?: string; purpose: string }
 ): Promise<{ result: string; structuredOutput?: unknown; modelUsage?: unknown }> {
+  if (closed) throw new Error('桥接已关闭')
+  const controller = new AbortController()
+  currentAbort = controller
+  try {
+    return await iterateQuery(prompt, { ...options, abortController: controller }, trace)
+  } finally {
+    if (currentAbort === controller) currentAbort = null
+  }
+}
+
+async function iterateQuery(
+  prompt: string,
+  options: Record<string, unknown>,
+  trace: { accountId: string; workItemId?: string; purpose: string }
+): Promise<{ result: string; structuredOutput?: unknown; modelUsage?: unknown }> {
   const sdkMod = await loadSdk()
   const q = sdkMod.query({ prompt, options: options as never })
   let last: { result: string; structuredOutput?: unknown; modelUsage?: unknown } | null = null
@@ -130,6 +176,7 @@ async function runQuery(
 }
 
 async function handleRequest(req: RpcRequest): Promise<void> {
+  if (closed) return
   try {
     switch (req.method) {
       case 'init': {
@@ -180,12 +227,21 @@ async function handleRequest(req: RpcRequest): Promise<void> {
         send({ id: req.id, ok: false, error: `未知方法: ${req.method}` })
     }
   } catch (e) {
-    send({ id: req.id, ok: false, error: (e as Error).message })
+    if (!closed) send({ id: req.id, ok: false, error: (e as Error).message })
   }
 }
 
 async function main(): Promise<void> {
+  // 父进程退出后本进程会被 launchd 收养：检测到 ppid 变化立即自杀，避免残留模型请求
+  const parentPid = process.ppid
+  const watchdog = setInterval(() => {
+    if (!closed && process.ppid !== parentPid) shutdown('父进程已退出')
+  }, 2000)
+  watchdog.unref()
+
   const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity })
+  // stdin EOF（父进程退出）：中止在途请求并退出
+  rl.on('close', () => shutdown('stdin 已关闭'))
   for await (const line of rl) {
     const trimmed = line.trim()
     if (!trimmed) continue
@@ -208,6 +264,7 @@ async function main(): Promise<void> {
       void handleRequest({ id: msg.id, method: msg.method, params: msg.params ?? {} })
     }
   }
+  shutdown('请求循环结束')
 }
 
 main().catch((e) => {

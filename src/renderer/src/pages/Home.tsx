@@ -268,9 +268,10 @@ export default function Home(): React.ReactNode {
     setInput('')
     atBottomRef.current = true
     try {
-      await window.daydream.chat.send({ accountId, message: text.trim() })
+      const res = await window.daydream.chat.send({ accountId, message: text.trim() })
       // 消息经 chat.message 事件回流刷新（不本地伪造，避免与持久化消息重复）
-      message.success('已发送给 Agent')
+      if (res.accepted) message.success('已发送给 Agent')
+      else message.warning('Agent 已停止运行，请先点击「开始运行」')
     } catch (e) {
       message.error((e as Error).message)
     } finally {

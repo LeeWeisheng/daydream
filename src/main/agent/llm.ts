@@ -12,6 +12,7 @@ import { auditLlmCall } from '../services/audit'
 import { logger } from '../services/logger'
 import { bridgeStructuredOutput, bridgeAgentTurn } from './llmBridge'
 import { getModelConfig } from './modelConfig'
+import { assertLlmAllowed, isLlmGateOpen, LlmBlockedError } from './llmGate'
 
 export { getModelConfig }
 
@@ -55,6 +56,8 @@ export async function structuredOutput<T>(
   const trace = llmTraceContext.getStore()
   let lastError: Error | null = null
   for (let attempt = 0; attempt <= attempts; attempt++) {
+    // 每次尝试前过闸：停止运行/退出后不再发起任何模型请求
+    assertLlmAllowed(accountId, opts.purpose)
     try {
       const result = await bridgeStructuredOutput({
         accountId,
@@ -71,6 +74,9 @@ export async function structuredOutput<T>(
       if (raw == null) throw new Error('结构化输出为空')
       return opts.schema.parse(raw)
     } catch (e) {
+      // 闸门关闭（停止运行/退出）：立即失败，不重试
+      if (e instanceof LlmBlockedError) throw e
+      if (!isLlmGateOpen()) throw new LlmBlockedError(`Agent 已停止运行，模型请求已中断（${opts.purpose}）`)
       lastError = e as Error
       auditLlmCall(accountId, 'structured', opts.purpose, null, false)
       logger.warn(`[llm] structured output attempt ${attempt + 1} failed for ${opts.purpose}: ${lastError.message}`)
@@ -93,6 +99,7 @@ export async function runAgentTurn(
     useProModel?: boolean
   }
 ): Promise<string> {
+  assertLlmAllowed(accountId, opts.purpose)
   const trace = llmTraceContext.getStore()
   try {
     const result = await bridgeAgentTurn({
@@ -107,6 +114,9 @@ export async function runAgentTurn(
     auditLlmCall(accountId, 'agent', opts.purpose, result.modelUsage, true)
     return result.result
   } catch (e) {
+    if (e instanceof LlmBlockedError) throw e
+    // 桥接被终止（停止运行/退出）导致的失败按闸门关闭处理，不做失败审计
+    if (!isLlmGateOpen()) throw new LlmBlockedError(`Agent 已停止运行，模型请求已中断（${opts.purpose}）`)
     if (e instanceof LlmUnavailableError) throw e
     auditLlmCall(accountId, 'agent', opts.purpose, null, false)
     throw new LlmUnavailableError(`Agent 会话失败（${opts.purpose}）: ${(e as Error).message}`)

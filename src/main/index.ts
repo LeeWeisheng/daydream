@@ -3,7 +3,7 @@
  * 架构：主进程承载全部业务（Agent/数据/回测/风控/绩效/SQLite），
  * 渲染进程仅展示与交互（contextIsolation + sandbox + 白名单 IPC）。
  */
-import { app, BrowserWindow, shell } from 'electron'
+import { app, BrowserWindow, powerMonitor, shell } from 'electron'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { initLogger, logger } from './services/logger'
@@ -12,6 +12,7 @@ import { openDatabase, ensureAccount, getDb } from './db'
 import { registerIpcHandlers, collectAccountSnapshot } from './ipc/handlers'
 import { startScheduler } from './scheduler'
 import { startAgentLoop, initAgentRunning, isAgentRunning, stopAgentRuntime } from './agent/loop'
+import { shutdownBridge, killBridgeSync } from './agent/llmBridge'
 import { recoverRunningWorkItems } from './agent/workitem'
 import { audit } from './services/audit'
 import { getDataStats } from './data/service'
@@ -108,9 +109,47 @@ function createWindow(): void {
   }
 }
 
+/**
+ * 默认开机自启动：登录系统后自动拉起 Daydream（macOS 登录项 / Windows 启动项）。
+ * - 仅打包后生效：开发模式会注册 Electron 本体，污染开发机登录项；
+ * - 每次启动重申默认值，用户若在系统设置中关闭，下次启动会恢复（暂无应用内开关）；
+ * - 自启动只拉起应用，Agent 是否运行仍由持久化开关 agent_running 决定。
+ */
+function ensureAutoLaunch(): void {
+  if (!app.isPackaged) {
+    logger.info('[app] 开发模式：跳过开机自启动设置')
+    return
+  }
+  try {
+    if (app.getLoginItemSettings().openAtLogin) {
+      logger.info('[app] 开机自启动：已开启')
+      return
+    }
+    app.setLoginItemSettings({ openAtLogin: true })
+    logger.info('[app] 开机自启动：已默认开启')
+  } catch (e) {
+    logger.warn(`[app] 开机自启动设置失败：${(e as Error).message}`)
+  }
+}
+
+// 单实例锁：多实例会各跑一套 Agent/调度器，同一账户会重复请求模型
+const hasSingleInstanceLock = app.requestSingleInstanceLock()
+if (!hasSingleInstanceLock) {
+  logger.warn('[app] another instance is already running, exiting')
+  app.exit(0)
+}
+app.on('second-instance', () => {
+  if (!mainWindow) return
+  if (mainWindow.isMinimized()) mainWindow.restore()
+  mainWindow.show()
+  mainWindow.focus()
+})
+
 app.whenReady().then(async () => {
+  if (!hasSingleInstanceLock) return
   initLogger()
   logger.info('[app] starting Daydream…')
+  ensureAutoLaunch()
 
   // macOS 应用菜单「关于 Daydream」面板信息
   if (process.platform === 'darwin') {
@@ -150,6 +189,13 @@ app.whenReady().then(async () => {
   initAgentRunning()
   startScheduler()
 
+  // 系统关机/重启：同步终止桥接进程组（含 SDK 的 cli 子进程），关机过程中不再有模型请求
+  powerMonitor.on('shutdown', () => {
+    logger.warn('[app] system shutdown: closing llm gate and killing bridge')
+    stopAgentRuntime()
+    killBridgeSync('system shutdown')
+  })
+
   // 配置种子（CLI 模式：写入后退出）
   if (await seedModelConfigIfRequested()) return
 
@@ -184,15 +230,44 @@ app.on('window-all-closed', () => {
 })
 
 let quitting = false
-app.on('before-quit', () => {
-  if (quitting) return
-  quitting = true
-  // 关闭软件时优雅停止 Agent 运行（不修改持久化开关：用户并未点击停止，重启后恢复）
+let quitReady = false
+
+/** 退出流程：关闸（禁止新请求）→ 终止桥接进程组（中断在途请求）→ 审计 → 真正退出 */
+async function shutdownAndQuit(): Promise<void> {
   const account = ensureAccount()
   const running = isAgentRunning()
-  if (running) {
-    stopAgentRuntime()
-    audit({ accountId: account?.id ?? 'global', actor: 'system', action: 'agent.stop_on_quit' })
-  }
+  // 关闭软件时停止 Agent 运行（不修改持久化开关：用户并未点击停止，重启后恢复）
+  stopAgentRuntime()
+  if (running) audit({ accountId: account?.id ?? 'global', actor: 'system', action: 'agent.stop_on_quit' })
+  await shutdownBridge('app quitting')
   if (account) audit({ accountId: account.id, actor: 'system', action: 'app.quit' })
+  quitReady = true
+  app.quit()
+}
+
+app.on('before-quit', (event) => {
+  if (quitReady) return
+  // 拦下退出：待桥接子进程被终止（在途模型请求中断）后再退出
+  event.preventDefault()
+  if (quitting) return
+  quitting = true
+  void shutdownAndQuit().catch((e) => {
+    logger.error(`[app] shutdown failed: ${(e as Error).message}`)
+    killBridgeSync('shutdown failed')
+    quitReady = true
+    app.quit()
+  })
+})
+
+// 兜底：进程被信号/异常终止时同步杀掉桥接进程组，避免残留子进程继续请求模型
+process.on('exit', () => killBridgeSync('process exit'))
+process.on('SIGTERM', () => {
+  stopAgentRuntime()
+  killBridgeSync('SIGTERM')
+  app.quit()
+})
+process.on('SIGINT', () => {
+  stopAgentRuntime()
+  killBridgeSync('SIGINT')
+  app.quit()
 })

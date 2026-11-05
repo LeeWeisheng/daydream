@@ -6,6 +6,7 @@
  * 每次搜索消耗一次完整模型轮次（延迟与 token），并产生 Search API 计费。
  */
 import { getModelConfig } from './modelConfig'
+import { assertLlmAllowed } from './llmGate'
 
 export interface WebSearchResult {
   query: string
@@ -34,7 +35,8 @@ function resolveMessagesUrl(baseUrl: string): string {
 }
 
 export async function deepseekWebSearch(accountId: string, query: string, maxUses = 1): Promise<WebSearchResult> {
-  void accountId
+  // 联网搜索同样是一次完整模型轮次：必须过闸（停止运行/退出后禁止）
+  assertLlmAllowed(accountId, 'web_search')
   const cfg = getModelConfig()
   if (!cfg) throw new Error('未配置模型，无法联网搜索')
 

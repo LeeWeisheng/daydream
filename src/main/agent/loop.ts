@@ -13,6 +13,8 @@ import { createWorkItem, getWorkItem, incrementAttempts, nextRunnableWorkItem, p
 import { structuredOutput, runAgentTurn, llmTraceContext } from './llm'
 import { EVALUATION_PROMPT, SYSTEM_IDENTITY } from './prompts'
 import { isModelConfigured } from './llm'
+import { closeLlmGate, isLlmGateOpen, LlmBlockedError, setLlmRunning } from './llmGate'
+import { shutdownBridge } from './llmBridge'
 import * as pipelines from '../pipeline'
 import { addChatMessage } from '../chat'
 
@@ -34,6 +36,8 @@ export function initAgentRunning(): void {
     [RUNNING_CONFIG_KEY]
   )[0]
   state.running = row?.value_encrypted === '1'
+  // 闸门与持久化开关同步：停止运行状态重启后仍是关闸
+  setLlmRunning(state.running)
   logger.info(`[agent] running switch initialized: ${state.running}`)
 }
 
@@ -45,29 +49,32 @@ export function isAgentRunning(): boolean {
 export function stopAgentRuntime(): void {
   state.active = false
   state.processing = false
+  // 永久关闸：本次进程生命周期内不再放行任何模型请求（在途请求由桥接终止中断）
+  setLlmRunning(false)
+  closeLlmGate('app quitting')
   logger.info('[agent] runtime stopped gracefully (app quitting)')
 }
 
 export function setAgentRunning(running: boolean): void {
   if (state.running === running) return
   state.running = running
+  // 先同步闸门：停止后任何在途/新模型请求立即被拒
+  setLlmRunning(running)
   run(
     `INSERT INTO app_config (account_id, scope, key, value_encrypted, updated_at) VALUES ('global', 'global', ?, '1', ?)
      ON CONFLICT(account_id, key) DO UPDATE SET value_encrypted = excluded.value_encrypted, updated_at = excluded.updated_at`,
     [RUNNING_CONFIG_KEY, nowIso()]
   )
-  if (!running) state.active = false
+  if (!running) {
+    state.active = false
+    // 终止桥接子进程组：中断在途模型请求与 SDK 工具循环（不再有后续轮次）
+    void shutdownBridge('agent stopped').catch((e) => logger.error(`[bridge] shutdown failed: ${(e as Error).message}`))
+  }
   logger.info(`[agent] running switch ${running ? 'ON' : 'OFF'}`)
 }
 
 export function getAgentStatus(): { active: boolean; running: boolean; lastTickAt: string } {
   return { active: state.active, running: state.running, lastTickAt: state.lastTickAt }
-}
-
-/** 用户主动触发的事件（不受运行开关限制） */
-const USER_EVENTS = new Set(['user.message', 'user_request'])
-function isUserEvent(type: string): boolean {
-  return USER_EVENTS.has(type)
 }
 
 /**
@@ -122,8 +129,8 @@ export async function handleAgentEvent(event: AgentEvent): Promise<void> {
     logger.debug(`[agent] ui-only event, no evaluation: ${event.type}`)
     return
   }
-  // 运行开关：停止运行时，自动事件一律忽略（用户主动事件除外）
-  if (!state.running && !isUserEvent(event.type)) {
+  // 运行开关：停止运行后一律不评估（含用户消息），保证不再有任何模型请求
+  if (!state.running) {
     logger.debug(`[agent] not running, skip event ${event.type}`)
     return
   }
@@ -152,6 +159,11 @@ export async function handleAgentEvent(event: AgentEvent): Promise<void> {
         purpose: `evaluate:${event.type}`
       })
     } catch (e) {
+      // 闸门关闭（停止运行/退出）：不再降级重试，也不触发任何后续模型请求
+      if (e instanceof LlmBlockedError || !isLlmGateOpen()) {
+        logger.info(`[agent] evaluate blocked (stopped/quitting): ${event.type}`)
+        return
+      }
       // 评估失败：按事件类型默认策略降级并审计
       const fallback = fallbackForEvent(event.type)
       logger.warn(`[agent] evaluate failed for ${event.type}, fallback: ${fallback}`)
@@ -198,28 +210,38 @@ function fallbackForEvent(eventType: string): 'no_action' | 'retry_later' {
 const MAX_CONCURRENCY = 2
 const runningItems = new Map<string, { promise: Promise<void>; settled: boolean }>()
 
+/**
+ * 停止运行：取消全部待执行的用户请求（闸门已关，排队后也不会执行）。
+ * 只在对话流回复说明，不发起任何模型请求。
+ */
+function cancelPendingUserRequests(): void {
+  const rows = queryAll<Pick<WorkItem, 'id' | 'accountId' | 'type' | 'sessionId'>>(
+    `SELECT id, account_id as accountId, type, session_id as sessionId FROM work_item WHERE status = 'pending' AND type = 'user_request'`
+  )
+  for (const item of rows) {
+    updateWorkItemStatus(item.id, 'cancelled', { error: 'Agent 已停止运行，请求未执行' })
+    addChatMessage({
+      accountId: item.accountId,
+      role: 'assistant',
+      kind: 'error',
+      content: 'Agent 已停止运行，本次请求未执行（未发起任何模型请求）。如需继续，请先点击「开始运行」。',
+      metaJson: JSON.stringify({ workItemType: item.type, reason: 'agent_not_running' }),
+      workItemId: item.id,
+      sessionId: item.sessionId
+    })
+    audit({ accountId: item.accountId, actor: 'system', action: 'workitem.cancelled', target: item.id, detail: { reason: 'agent_not_running' } })
+  }
+}
+
 /** 常驻 tick：取到期工作项并执行；由 scheduler 周期性调用 */
 export async function tickWorkItems(): Promise<void> {
   state.lastTickAt = new Date().toISOString()
-  // 运行开关：停止运行时仅执行用户主动请求（user_request），自动任务不再调度
+  // 运行开关：停止运行后不调度任何工作项（包括用户请求），彻底禁止模型请求
   if (!state.running) {
     for (const [id, entry] of Array.from(runningItems.entries())) {
       if (entry.settled) runningItems.delete(id)
     }
-    while (runningItems.size < MAX_CONCURRENCY) {
-      const item = nextRunnableWorkItem(state.activeKeys, nowIso(), (wi) => wi.type === 'user_request')
-      if (!item) break
-      const busKey = (parseContext(item.contextJson)['__busKey'] as string | undefined) ?? `wi:${item.id}`
-      state.activeKeys.add(busKey)
-      const entry = { promise: Promise.resolve(), settled: false }
-      entry.promise = executeWorkItem(item)
-        .catch((e) => logger.error(`[agent] workitem ${item.id} crashed: ${(e as Error).message}`))
-        .finally(() => {
-          entry.settled = true
-          state.activeKeys.delete(busKey)
-        })
-      runningItems.set(item.id, entry)
-    }
+    cancelPendingUserRequests()
     return
   }
   // 清理已完成的任务槽
@@ -291,8 +313,17 @@ export async function executeWorkItem(item: WorkItem): Promise<void> {
   } catch (e) {
     clearTimeout(timeout)
     const err = e as Error
-    logger.warn(`[agent] workitem ${item.id} failed (attempt ${item.attempts}/${item.maxAttempts}): ${err.message}`)
-    if (item.attempts >= item.maxAttempts) {
+    // 停止运行/退出导致的中断：不再重试、不再触发失败评估（不产生任何后续模型请求）
+    if (err instanceof LlmBlockedError || !isLlmGateOpen()) {
+      updateWorkItemStatus(item.id, 'cancelled', { error: 'Agent 已停止运行，执行被中断' })
+      logger.info(`[agent] workitem ${item.id} cancelled (agent stopped/quitting)`)
+      audit({ accountId: item.accountId, actor: 'system', action: 'workitem.cancelled', target: item.id, detail: { type: item.type, reason: 'agent_stopped' } })
+      return
+    }
+    // 重试次数以数据库为准（tick 时的 item 快照可能已过期，避免多跑一轮）
+    const attemptsNow = getWorkItem(item.id)?.attempts ?? item.attempts + 1
+    logger.warn(`[agent] workitem ${item.id} failed (attempt ${attemptsNow}/${item.maxAttempts}): ${err.message}`)
+    if (attemptsNow >= item.maxAttempts) {
       updateWorkItemStatus(item.id, 'failed', { error: err.message })
       // 失败结果进首页对话流
       const label = WORKITEM_LABELS[item.type] ?? item.type

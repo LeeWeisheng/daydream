@@ -598,6 +598,17 @@ export function registerIpcHandlers(): void {
     if (!message) throw new Error('消息不能为空')
     // 用户消息写入对话流
     addChatMessage({ accountId: req.accountId, role: 'user', content: message })
+    // 停止运行：不创建请求、不发起任何模型请求，仅在对话流说明
+    if (!isAgentRunning()) {
+      addChatMessage({
+        accountId: req.accountId,
+        role: 'assistant',
+        kind: 'error',
+        content: 'Agent 已停止运行，本次消息未处理（未发起任何模型请求）。如需继续，请先点击「开始运行」。'
+      })
+      audit({ accountId: req.accountId, actor: 'user', action: 'chat.rejected', detail: { reason: 'agent_not_running' } })
+      return { accepted: false, reason: 'agent_not_running' }
+    }
     const item = createWorkItem({
       accountId: req.accountId,
       type: 'user_request',

@@ -10,6 +10,7 @@ import { ensureAccount, queryAll } from './db'
 import { logger } from './services/logger'
 import { decryptString } from './services/crypto'
 import { structuredOutput, runAgentTurn, isModelConfigured } from './agent/llm'
+import { setLlmRunning } from './agent/llmGate'
 import { deepseekWebSearch } from './agent/webSearch'
 import { SYSTEM_IDENTITY } from './agent/prompts'
 
@@ -26,6 +27,8 @@ export async function runAgentSelfTest(): Promise<number> {
     return 1
   }
   logger.info('[selftest] ===== Agent 自测开始 =====')
+  // CLI 诊断模式：显式放行模型请求（不受运行开关限制）
+  setLlmRunning(true)
   if (!isModelConfigured()) {
     // 诊断：输出配置行与解密结果（不输出密钥明文）
     const row = queryAll<{ value_encrypted: string }>(
