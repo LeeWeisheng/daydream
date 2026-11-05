@@ -20,8 +20,8 @@ export interface LayoutToken {
 
 const LAYOUT_TOKEN: LayoutToken = {
   headerH: 48,
-  /** 侧边栏宽度（紧凑型：图标 + 两字导航名，刚好容纳菜单不出现滚动条） */
-  siderW: 92
+  /** 侧边栏宽度（紧凑型：48px 导航项 + 左右各 8px 内边距） */
+  siderW: 64
 }
 
 // ---------- antd 样式 token：亮/暗两套（保持交易终端观感） ----------
@@ -108,6 +108,10 @@ export const GlobalStyles = createGlobalStyle(({ theme }) => {
   // 亮色：header/sider 浅灰、content 白色卡片（上/左边框 + 左上圆角）；暗色：保持面板式布局
   const chromeBg = isDark ? token.colorBgContainer : token.colorBgLayout
   const contentBg = isDark ? token.colorBgLayout : token.colorBgContainer
+  // 侧边栏导航态：暗色用白色透明度、亮色用黑色透明度叠加，选中文本取纯白/纯黑保证对比
+  const navHoverBg = isDark ? 'rgba(255, 255, 255, 0.06)' : 'rgba(0, 0, 0, 0.045)'
+  const navActiveBg = isDark ? 'rgba(255, 255, 255, 0.12)' : 'rgba(0, 0, 0, 0.08)'
+  const navActiveText = isDark ? '#ffffff' : '#000000'
   return {
     '*': { boxSizing: 'border-box' },
     // 网页整体 color-schema：随亮/暗主题切换，驱动原生滚动条/表单控件/系统 UI 配色
@@ -162,7 +166,20 @@ export const GlobalStyles = createGlobalStyle(({ theme }) => {
     '.dd-header.dd-header-mac': { paddingLeft: 84 },
     '.dd-header-left, .dd-header-right': { display: 'flex', alignItems: 'center', gap: 8 },
     '.dd-no-drag': { WebkitAppRegion: 'no-drag' },
+    // Tooltip 包裹层：disabled 的 antd Button 不派发鼠标事件，需外层 span 承载悬浮提示
+    '.dd-tooltip-wrap': { display: 'inline-flex' },
     '.dd-header-title': { fontWeight: 700, fontSize: 14, letterSpacing: 0.5 },
+
+    // 账户切换下拉选项：名称占满剩余宽度并省略，选中勾靠右对齐（不参与挤压名称）
+    '.dd-account-option': { display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 },
+    '.dd-account-option-name': {
+      flex: 1,
+      minWidth: 0,
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
+      whiteSpace: 'nowrap'
+    },
+    '.dd-account-option-check': { fontSize: 11, flex: 'none', color: token.colorPrimary },
 
     '.dd-win-controls': {
       display: 'flex',
@@ -203,32 +220,50 @@ export const GlobalStyles = createGlobalStyle(({ theme }) => {
       padding: '10px 8px',
       display: 'flex',
       flexDirection: 'column',
-      gap: 14
+      // 组间间距与组内项间距一致，保证任意相邻导航项上下距离均为 8px
+      gap: 8
     },
-    '.dd-sidebar-group': { display: 'flex', flexDirection: 'column', gap: 2 },
+    '.dd-sidebar-group': { display: 'flex', flexDirection: 'column' },
+    // 导航项实际容器（group 的直接子层）：项与项上下间距 4px
+    '.dd-sidebar-menu': { display: 'flex', flexDirection: 'column', gap: 4 },
     // 系统组：推到 sider 底部（margin-top:auto 吸收上方剩余空间）
     '.dd-sidebar-group-bottom': { marginTop: 'auto' },
+    // 导航项：图标在上、名称在下，固定 48x48 居中
     '.dd-sidebar-item': {
       display: 'flex',
+      flexDirection: 'column',
       alignItems: 'center',
-      gap: 8,
-      width: '100%',
-      padding: '8px 10px',
+      justifyContent: 'center',
+      gap: 0,
+      width: 48,
+      height: 48,
+      padding: 0,
       border: 'none',
       background: 'transparent',
-      borderRadius: token.borderRadius,
+      borderRadius: 10,
       color: token.colorTextSecondary,
-      fontSize: 13,
+      fontSize: 12,
       fontWeight: 500,
+      lineHeight: '16px',
       cursor: 'pointer',
-      textAlign: 'left',
       whiteSpace: 'nowrap',
       transition: 'background 0.15s ease, color 0.15s ease'
     },
-    '.dd-sidebar-item:hover': { background: token.colorFillTertiary, color: token.colorText },
-    '.dd-sidebar-item[data-active]': { background: token.colorPrimaryBg, color: token.colorPrimary, fontWeight: 600 },
-    '.dd-sidebar-icon': { fontSize: 16, flex: 'none', display: 'inline-flex' },
-    '.dd-sidebar-label': { overflow: 'hidden', textOverflow: 'ellipsis' },
+    '.dd-sidebar-item:hover': { background: navHoverBg, color: token.colorText },
+    // 选中态仅改颜色与背景，字重恒为 500
+    '.dd-sidebar-item[data-active]': { background: navActiveBg, color: navActiveText },
+    '.dd-sidebar-item[data-active]:hover': { background: navActiveBg, color: navActiveText },
+    // 图标 16px / 行高 24px（与文本 16px 行高合计正好 40px）
+    '.dd-sidebar-icon': {
+      fontSize: 16,
+      lineHeight: '24px',
+      height: 24,
+      flex: 'none',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center'
+    },
+    '.dd-sidebar-label': { fontSize: 12, lineHeight: '16px', fontWeight: 500, letterSpacing: 0.5 },
 
     // ---------- 首页两列 ----------
     '.dd-home': { display: 'flex', height: '100%', gap: 0 },
