@@ -108,9 +108,8 @@ export const GlobalStyles = createGlobalStyle(({ theme }) => {
   // 亮色：header/sider 浅灰、content 白色卡片（上/左边框 + 左上圆角）；暗色：保持面板式布局
   const chromeBg = isDark ? token.colorBgContainer : token.colorBgLayout
   const contentBg = isDark ? token.colorBgLayout : token.colorBgContainer
-  // 内容卡片：亮色白底 + 极轻阴影，暗色提亮一档并去掉阴影（避免浑浊）
+  // 内容卡片：亮色白底、暗色提亮一档；一律不用阴影，仅靠边框区隔层级
   const cardBg = isDark ? token.colorBgContainer : token.colorBgElevated
-  const cardShadow = isDark ? 'none' : '0 1px 2px rgba(16, 24, 40, 0.04), 0 10px 24px -18px rgba(16, 24, 40, 0.35)'
   // 侧边栏导航态：暗色用白色透明度、亮色用黑色透明度叠加，选中文本取纯白/纯黑保证对比
   const navHoverBg = isDark ? 'rgba(255, 255, 255, 0.06)' : 'rgba(0, 0, 0, 0.045)'
   const navActiveBg = isDark ? 'rgba(255, 255, 255, 0.12)' : 'rgba(0, 0, 0, 0.08)'
@@ -311,10 +310,8 @@ export const GlobalStyles = createGlobalStyle(({ theme }) => {
       background: cardBg,
       border: `1px solid ${token.colorBorderSecondary}`,
       borderRadius: 10,
-      boxShadow: cardShadow,
       overflow: 'hidden'
     },
-    '.dd-card-flat': { boxShadow: 'none' },
     '.dd-card-head': {
       display: 'flex',
       alignItems: 'center',
@@ -602,7 +599,6 @@ export const GlobalStyles = createGlobalStyle(({ theme }) => {
       border: `1px solid ${token.colorBorderSecondary}`,
       borderRadius: 10,
       background: cardBg,
-      boxShadow: cardShadow,
       padding: 14
     },
     // 面板（虚线边框，条件块等）

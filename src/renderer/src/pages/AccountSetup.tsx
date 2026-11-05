@@ -53,8 +53,7 @@ export default function AccountSetup(): React.ReactNode {
         style={{
           width: '100%',
           maxWidth: 460,
-          padding: '28px 28px 24px',
-          boxShadow: '0 24px 64px -32px rgba(16, 24, 40, 0.45)'
+          padding: '28px 28px 24px'
         }}
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 }}>

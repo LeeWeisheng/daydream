@@ -595,7 +595,7 @@ export default function StrategyPage(): React.ReactNode {
               const current = v.version === strategy?.version
               const expanded = expandedVersion === v.id
               return (
-                <div key={v.id} className="dd-card dd-card-flat">
+                <div key={v.id} className="dd-card">
                   <div style={{ padding: '10px 12px', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 }}>
                     <div style={{ minWidth: 0 }}>
                       <Space size={6} wrap>

@@ -1,5 +1,5 @@
 /**
- * 内容卡片：统一的边框/圆角/轻阴影与「标题 + 右侧操作」头部。
+ * 内容卡片：统一的边框/圆角（不使用阴影）与「标题 + 右侧操作」头部。
  * 通过 bodyClassName / flush 控制内容区留白，便于表格铺满卡片。
  */
 import type { CSSProperties } from 'react'
