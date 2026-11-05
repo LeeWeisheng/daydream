@@ -4,8 +4,7 @@
  * 内置服务商预设：选择后 baseURL / 模型名 / 上下文等自动填充，仅需填 API Key。
  */
 import { useEffect, useState } from 'react'
-import { Modal, Form, Input, Select, Alert, message } from 'antd'
-import { useAntdToken } from 'antd-style'
+import { Modal, Form, Input, InputNumber, Select, Alert, message } from 'antd'
 import type { ModelConfig, ModelPreset } from '@shared/types'
 
 interface FormValues {
@@ -18,9 +17,7 @@ interface FormValues {
 }
 
 export default function ModelConfigModal(): React.ReactNode {
-  const token = useAntdToken()
   const [open, setOpen] = useState(false)
-  const [modelConfigured, setModelConfigured] = useState(true)
   const [presets, setPresets] = useState<ModelPreset[]>([])
   const [presetId, setPresetId] = useState<string>()
   const [custom, setCustom] = useState(false)
@@ -33,7 +30,6 @@ export default function ModelConfigModal(): React.ReactNode {
         .get('global')
         .then((s) => {
           setPresets(s.presets)
-          setModelConfigured(s.modelConfigured)
           if (!s.modelConfigured) {
             setOpen(true)
             const cfg = s.modelConfig
@@ -87,7 +83,6 @@ export default function ModelConfigModal(): React.ReactNode {
       })
       message.success('模型配置已保存（全局通用，加密存储）')
       setOpen(false)
-      setModelConfigured(true)
     } catch (e) {
       message.error((e as Error).message)
     } finally {
@@ -106,38 +101,46 @@ export default function ModelConfigModal(): React.ReactNode {
       cancelButtonProps={{ style: { display: 'none' } }}
       onOk={() => form.submit()}
       confirmLoading={submitting}
-      width={540}
+      width={560}
     >
       <Alert
         type="info"
         showIcon
-        style={{ marginBottom: 16 }}
-        message="模型配置为全局通用（所有账户共用）；内置服务商预设（DeepSeek/OpenAI/Anthropic 等），baseURL 与模型名自动填充，仅需填写 API Key。"
+        style={{ marginBottom: 14 }}
+        message="模型配置为全局通用（所有账户共用）；内置服务商预设（DeepSeek / OpenAI / Anthropic 等），baseURL 与模型名自动填充，仅需填写 API Key。"
       />
       <Form form={form} layout="vertical" onFinish={save}>
-        <Form.Item label="服务商预设（内置默认 baseURL / 模型名 / 上下文）">
+        <Form.Item label="服务商预设" style={{ marginBottom: 12 }}>
           <Select
-            placeholder="选择预设"
+            placeholder="选择预设（自动填充 baseURL / 模型名 / 上下文等）"
             value={presetId}
             onChange={applyPreset}
-            options={[...presets.map((p) => ({ value: p.id, label: `${p.name}（${p.model}）` })), { value: 'custom', label: '自定义（OpenAI/Anthropic 兼容）' }]}
+            options={[...presets.map((p) => ({ value: p.id, label: `${p.name}（${p.model}）` })), { value: 'custom', label: '自定义（OpenAI / Anthropic 兼容）' }]}
           />
         </Form.Item>
-        <Form.Item name="baseUrl" label="API 地址（baseURL）" rules={[{ required: true, message: '请填写 API 地址' }]}>
-          <Input placeholder="https://api.deepseek.com/anthropic" disabled={!custom} />
-        </Form.Item>
-        <Form.Item name="apiKey" label="API Key / Token" rules={[{ required: true, message: '请填写 API Key' }]}>
-          <Input.Password placeholder="加密存储，仅本机使用" />
-        </Form.Item>
-        <Form.Item name="model" label="主模型（评估/常规任务）" rules={[{ required: true, message: '请填写模型名' }]}>
-          <Input placeholder="deepseek-chat" disabled={!custom} />
-        </Form.Item>
-        <Form.Item name="modelPro" label="重型任务模型（策略生成/复盘/纠正，可选）">
-          <Input placeholder="留空则复用主模型" disabled={!custom} />
-        </Form.Item>
+        <div className="dd-form-grid" style={{ rowGap: 0 }}>
+          <Form.Item name="baseUrl" label="API 地址（baseURL）" rules={[{ required: true, message: '请填写 API 地址' }]} style={{ gridColumn: '1 / -1' }}>
+            <Input placeholder="https://api.deepseek.com/anthropic" disabled={!custom} />
+          </Form.Item>
+          <Form.Item name="apiKey" label="API Key / Token" rules={[{ required: true, message: '请填写 API Key' }]} style={{ gridColumn: '1 / -1' }}>
+            <Input.Password placeholder="加密存储，仅本机使用" />
+          </Form.Item>
+          <Form.Item name="model" label="主模型（评估 / 常规任务）" rules={[{ required: true, message: '请填写模型名' }]}>
+            <Input placeholder="deepseek-chat" disabled={!custom} />
+          </Form.Item>
+          <Form.Item name="modelPro" label="重型任务模型（可选）">
+            <Input placeholder="留空则复用主模型" disabled={!custom} />
+          </Form.Item>
+          <Form.Item name="contextWindow" label="上下文长度">
+            <InputNumber style={{ width: '100%' }} min={1024} step={1024} />
+          </Form.Item>
+          <Form.Item name="maxCallsPerHour" label="每小时调用上限">
+            <InputNumber style={{ width: '100%' }} min={1} />
+          </Form.Item>
+        </div>
       </Form>
-      <div style={{ color: token.colorTextSecondary, fontSize: 12 }}>
-        说明：模型未配置时 Agent 决策闭环不运行（数据与回测功能不受影响）；API Key 加密存储，调用统计入审计。
+      <div className="dd-form-hint">
+        说明：模型未配置时 Agent 决策闭环不运行（数据 / 回测 / 资金功能不受影响）；API Key 加密存储，调用统计入审计。选择预设后也可直接微调上下文与限流参数。
       </div>
     </Modal>
   )

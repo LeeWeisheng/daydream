@@ -108,6 +108,9 @@ export const GlobalStyles = createGlobalStyle(({ theme }) => {
   // 亮色：header/sider 浅灰、content 白色卡片（上/左边框 + 左上圆角）；暗色：保持面板式布局
   const chromeBg = isDark ? token.colorBgContainer : token.colorBgLayout
   const contentBg = isDark ? token.colorBgLayout : token.colorBgContainer
+  // 内容卡片：亮色白底 + 极轻阴影，暗色提亮一档并去掉阴影（避免浑浊）
+  const cardBg = isDark ? token.colorBgContainer : token.colorBgElevated
+  const cardShadow = isDark ? 'none' : '0 1px 2px rgba(16, 24, 40, 0.04), 0 10px 24px -18px rgba(16, 24, 40, 0.35)'
   // 侧边栏导航态：暗色用白色透明度、亮色用黑色透明度叠加，选中文本取纯白/纯黑保证对比
   const navHoverBg = isDark ? 'rgba(255, 255, 255, 0.06)' : 'rgba(0, 0, 0, 0.045)'
   const navActiveBg = isDark ? 'rgba(255, 255, 255, 0.12)' : 'rgba(0, 0, 0, 0.08)'
@@ -265,69 +268,286 @@ export const GlobalStyles = createGlobalStyle(({ theme }) => {
     },
     '.dd-sidebar-label': { fontSize: 12, lineHeight: '16px', fontWeight: 500, letterSpacing: 0.5 },
 
-    // ---------- 首页两列 ----------
-    '.dd-home': { display: 'flex', height: '100%', gap: 0 },
-    '.dd-home-left': { flex: 3, minWidth: 0, display: 'flex', flexDirection: 'column', paddingRight: 16 },
-    '.dd-home-right': { flex: 2, minWidth: 240, paddingLeft: 16, borderLeft: `1px solid ${token.colorBorder}`, overflow: 'auto' },
-    '.dd-section': { padding: '10px 0', borderBottom: `1px dashed ${token.colorBorderSecondary}` },
-    '.dd-section:last-child': { borderBottom: 'none' },
-    '.dd-section-title': { fontSize: 12, fontWeight: 600, color: token.colorTextSecondary, marginBottom: 8, letterSpacing: 0.5 },
-    '.dd-stat-row': { display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', padding: '3px 0' },
-    '.dd-stat-label': { color: token.colorTextSecondary, fontSize: 12 },
-    '.dd-stat-value': { fontSize: 13, fontWeight: 600, fontVariantNumeric: 'tabular-nums' },
+    // ---------- 页面壳（标题区 / 工具栏 / 栅格） ----------
+    '.dd-page': {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 14,
+      padding: '18px 22px 26px',
+      minHeight: '100%'
+    },
+    '.dd-page-fill': { height: '100%', minHeight: 0 },
+    '.dd-page-head': {
+      display: 'flex',
+      alignItems: 'flex-start',
+      justifyContent: 'space-between',
+      gap: 16,
+      flexWrap: 'wrap'
+    },
+    '.dd-page-head-main': { minWidth: 0, display: 'flex', flexDirection: 'column', gap: 4 },
+    '.dd-page-title-row': { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
+    '.dd-page-title': { fontSize: 17, fontWeight: 700, lineHeight: 1.3, letterSpacing: 0.2, margin: 0 },
+    '.dd-page-desc': { fontSize: 12, color: token.colorTextSecondary, lineHeight: 1.65 },
+    '.dd-page-actions': { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
+    '.dd-toolbar': { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
+    '.dd-toolbar-spacer': { flex: 1, minWidth: 8 },
+    '.dd-grid-2': { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 14, alignItems: 'start' },
+    // 主区 + 侧栏（默认侧栏 300px，窄窗口自动堆叠）
+    '.dd-grid-main-side': { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 300px', gap: 14, alignItems: 'start' },
+    '.dd-grid-main-side-wide': { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 340px', gap: 14, alignItems: 'start' },
+    // 表单 + 预估算卡（表单固定宽度上限，右侧自适应）
+    '.dd-grid-form-side': { display: 'grid', gridTemplateColumns: 'minmax(320px, 440px) minmax(0, 1fr)', gap: 14, alignItems: 'start' },
+    '@media (max-width: 1080px)': {
+      '.dd-grid-main-side, .dd-grid-main-side-wide, .dd-grid-form-side': { gridTemplateColumns: 'minmax(0, 1fr)' },
+      '.dd-rail': { width: 300, minWidth: 260 }
+    },
+    '.dd-form-grid': { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', columnGap: 12 },
+
+    // ---------- 卡片 / 面板 ----------
+    '.dd-card': {
+      display: 'flex',
+      flexDirection: 'column',
+      minWidth: 0,
+      background: cardBg,
+      border: `1px solid ${token.colorBorderSecondary}`,
+      borderRadius: 10,
+      boxShadow: cardShadow,
+      overflow: 'hidden'
+    },
+    '.dd-card-flat': { boxShadow: 'none' },
+    '.dd-card-head': {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: 10,
+      flex: 'none',
+      minHeight: 42,
+      padding: '9px 14px',
+      borderBottom: `1px solid ${token.colorBorderSecondary}`,
+      flexWrap: 'wrap'
+    },
+    '.dd-card-head-plain': { borderBottom: 'none', paddingBottom: 0 },
+    '.dd-card-heading': { display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, flexWrap: 'wrap' },
+    '.dd-card-title': { fontSize: 13, fontWeight: 600, letterSpacing: 0.2, color: token.colorText },
+    '.dd-card-sub': { fontSize: 12, color: token.colorTextSecondary },
+    '.dd-card-actions': { display: 'flex', alignItems: 'center', gap: 8, flex: 'none' },
+    '.dd-card-body': { padding: 14 },
+    '.dd-card-body-tight': { padding: 10 },
+    '.dd-card-body-flush': { padding: 0 },
+    '.dd-card-scroll': { overflow: 'auto', minHeight: 0 },
+
+    // ---------- KPI 指标卡 ----------
+    '.dd-kpi-grid': { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(146px, 1fr))', gap: 10 },
+    '.dd-kpi': {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 3,
+      minWidth: 0,
+      padding: '10px 12px',
+      borderRadius: 8,
+      border: `1px solid ${token.colorBorderSecondary}`,
+      background: isDark ? token.colorFillQuaternary : token.colorBgLayout
+    },
+    '.dd-kpi-label': {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 5,
+      fontSize: 11,
+      color: token.colorTextSecondary,
+      letterSpacing: 0.2,
+      whiteSpace: 'nowrap',
+      overflow: 'hidden',
+      textOverflow: 'ellipsis'
+    },
+    '.dd-kpi-value': {
+      fontSize: 19,
+      fontWeight: 700,
+      lineHeight: 1.2,
+      letterSpacing: '-0.2px',
+      fontVariantNumeric: 'tabular-nums',
+      whiteSpace: 'nowrap',
+      overflow: 'hidden',
+      textOverflow: 'ellipsis'
+    },
+    '.dd-kpi-sub': { fontSize: 11, color: token.colorTextTertiary, fontVariantNumeric: 'tabular-nums' },
+
+    // ---------- 通用行 / 列表 ----------
+    '.dd-row': { display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 10 },
+    '.dd-row-label': { fontSize: 12, color: token.colorTextSecondary },
+    '.dd-row-value': { fontSize: 13, fontWeight: 600, fontVariantNumeric: 'tabular-nums' },
+    '.dd-list': { display: 'flex', flexDirection: 'column' },
+    '.dd-list-item': {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 4,
+      padding: '9px 0',
+      borderBottom: `1px dashed ${token.colorBorderSecondary}`
+    },
+    '.dd-list-item:first-of-type': { paddingTop: 0 },
+    '.dd-list-item:last-of-type': { borderBottom: 'none', paddingBottom: 0 },
+    '.dd-empty': {
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 6,
+      padding: '26px 12px',
+      color: token.colorTextSecondary,
+      fontSize: 12,
+      textAlign: 'center'
+    },
+    '.dd-chip-row': { display: 'flex', gap: 6, flexWrap: 'wrap' },
+    '.dd-chip': {
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 4,
+      border: `1px dashed ${token.colorBorder}`,
+      background: 'transparent',
+      color: token.colorTextSecondary,
+      borderRadius: 999,
+      padding: '3px 10px',
+      fontSize: 12,
+      lineHeight: '18px',
+      cursor: 'pointer',
+      transition: 'all 0.15s ease'
+    },
+    '.dd-chip:hover': { color: token.colorPrimary, borderColor: token.colorPrimary, background: token.colorPrimaryBg },
+    '.dd-dot': { display: 'inline-block', width: 6, height: 6, borderRadius: '50%', flex: 'none' },
+    '.dd-pulse': { animation: 'dd-pulse 1.8s ease-out infinite' },
+    '@keyframes dd-pulse': {
+      '0%': { boxShadow: '0 0 0 0 rgba(82, 196, 26, 0.45)' },
+      '70%': { boxShadow: '0 0 0 5px rgba(82, 196, 26, 0)' },
+      '100%': { boxShadow: '0 0 0 0 rgba(82, 196, 26, 0)' }
+    },
+    '.dd-mono': {
+      fontFamily: "'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace",
+      fontSize: 12,
+      lineHeight: 1.65
+    },
     '.dd-up': { color: danger },
     '.dd-down': { color: success },
 
-    // ---------- 对话流 ----------
+    // ---------- 首页：对话流 + 信息栏 ----------
+    '.dd-home': { display: 'flex', height: '100%', minHeight: 0 },
+    '.dd-home-main': { flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', minHeight: 0 },
     '.dd-chat': { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' },
-    '.dd-chat-list': { flex: 1, overflow: 'auto', padding: '4px 4px 12px' },
-    '.dd-chat-sender': { flex: 'none', borderTop: `1px dashed ${token.colorBorderSecondary}`, paddingTop: 10 },
+    '.dd-chat-head': {
+      flex: 'none',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: 12,
+      padding: '10px 20px',
+      borderBottom: `1px solid ${token.colorBorderSecondary}`
+    },
+    '.dd-chat-list-wrap': { position: 'relative', flex: 1, minHeight: 0 },
+    '.dd-chat-list': { position: 'absolute', inset: 0, overflowY: 'auto', overflowX: 'hidden', padding: '16px 20px 8px' },
+    '.dd-chat-sender': {
+      flex: 'none',
+      padding: '10px 20px 12px',
+      borderTop: `1px solid ${token.colorBorderSecondary}`
+    },
+    '.dd-chat-hint': { marginTop: 6, fontSize: 11, color: token.colorTextTertiary, textAlign: 'right' },
     '.dd-chat-empty': {
       display: 'flex',
-      height: '100%',
+      height: 'calc(100% - 30px)',
       alignItems: 'center',
       justifyContent: 'center',
       color: token.colorTextSecondary,
       flexDirection: 'column',
-      gap: 8
+      gap: 10,
+      textAlign: 'center'
     },
-    '.dd-chat-group': { marginBottom: 10 },
-    '.dd-chat-top': { display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 24, padding: '2px 0', fontSize: 12 },
-    '.dd-chat .ant-bubble-list': { padding: '0 4px' },
-    '.dd-chat .ant-bubble-content': { maxHeight: 420, overflow: 'auto' },
+    '.dd-chat-group': { marginBottom: 16, maxWidth: '100%' },
+    '.dd-chat-top': {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 6,
+      minHeight: 22,
+      fontSize: 11,
+      color: token.colorTextTertiary
+    },
+    '.dd-chat-day': { display: 'flex', alignItems: 'center', gap: 10, margin: '2px 0 14px', color: token.colorTextTertiary },
+    '.dd-chat-day::before, .dd-chat-day::after': {
+      content: '""',
+      flex: 1,
+      borderTop: `1px dashed ${token.colorBorderSecondary}`
+    },
+    '.dd-chat-day > span': { fontSize: 11, whiteSpace: 'nowrap' },
+    '.dd-chat-jump': { position: 'absolute', right: 18, bottom: 14, zIndex: 5 },
+    '.dd-chat .ant-bubble': { maxWidth: 'min(100%, 820px)' },
+    '.dd-chat .ant-bubble-content': { maxHeight: 460, overflow: 'auto' },
+    '.dd-chat .ant-bubble-footer': { marginTop: 8 },
 
     // 消息元信息
-    '.dd-msg-meta': { display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '4px 8px', marginBottom: 2, minHeight: 20 },
+    '.dd-msg-meta': { display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '4px 8px', minHeight: 22 },
     '.dd-msg-role': { fontWeight: 600, fontSize: 12, color: token.colorText },
-    '.dd-msg-time': { fontSize: 12, color: token.colorTextSecondary, fontVariantNumeric: 'tabular-nums' },
+    '.dd-msg-time': { fontSize: 11, color: token.colorTextTertiary, fontVariantNumeric: 'tabular-nums' },
+    '.dd-msg-copy': {
+      border: 'none',
+      background: 'transparent',
+      color: token.colorTextTertiary,
+      cursor: 'pointer',
+      padding: '0 2px',
+      fontSize: 11,
+      lineHeight: 1,
+      opacity: 0,
+      transition: 'opacity 0.15s ease, color 0.15s ease'
+    },
+    '.dd-chat-group:hover .dd-msg-copy': { opacity: 1 },
+    '.dd-msg-copy:hover': { color: token.colorPrimary },
 
     // 运行细节折叠
-    '.dd-run-details': { margin: '2px 0 4px 40px' },
+    '.dd-run-details': { margin: '6px 0 0 42px' },
     '.dd-details-toggle': {
       display: 'inline-flex',
       alignItems: 'center',
       gap: 4,
-      border: 'none',
+      border: `1px solid ${token.colorBorderSecondary}`,
       background: 'transparent',
       color: token.colorTextSecondary,
-      fontSize: 12,
+      fontSize: 11,
       cursor: 'pointer',
-      padding: '2px 4px',
-      borderRadius: 4
+      padding: '2px 8px',
+      borderRadius: 999,
+      transition: 'all 0.15s ease'
     },
-    '.dd-details-toggle:hover': { color: token.colorPrimary, background: token.colorFillTertiary },
-    '.dd-details-body': { marginTop: 4, borderLeft: `2px solid ${token.colorBorderSecondary}`, paddingLeft: 8 },
-    '.dd-detail-row': { display: 'flex', alignItems: 'baseline', gap: 4, padding: '3px 0', fontSize: 12 },
-    '.dd-detail-time': { color: token.colorTextSecondary, fontSize: 11, flex: 'none', fontVariantNumeric: 'tabular-nums' },
+    '.dd-details-toggle:hover': { color: token.colorPrimary, borderColor: token.colorPrimary, background: token.colorPrimaryBg },
+    '.dd-details-body': {
+      marginTop: 6,
+      borderLeft: `2px solid ${token.colorBorderSecondary}`,
+      paddingLeft: 10,
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 2
+    },
+    '.dd-detail-row': { display: 'flex', alignItems: 'baseline', gap: 6, padding: '3px 0', fontSize: 12 },
+    '.dd-detail-time': { color: token.colorTextTertiary, fontSize: 11, flex: 'none', fontVariantNumeric: 'tabular-nums' },
     '.dd-detail-content': {
       color: token.colorTextSecondary,
       whiteSpace: 'pre-wrap',
       wordBreak: 'break-word',
-      maxHeight: 120,
+      maxHeight: 140,
       overflow: 'auto',
       flex: 1,
       minWidth: 0
     },
+
+    // 右栏信息卡
+    '.dd-rail': {
+      flex: 'none',
+      width: 344,
+      minWidth: 288,
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 12,
+      padding: 14,
+      overflowY: 'auto',
+      borderLeft: `1px solid ${token.colorBorderSecondary}`,
+      background: token.colorBgLayout
+    },
+    '.dd-rail .dd-card': { flex: 'none' },
 
     // ---------- 策略文档 Markdown 渲染 ----------
     '.dd-markdown': {
@@ -372,20 +592,30 @@ export const GlobalStyles = createGlobalStyle(({ theme }) => {
     '.dd-markdown hr': { border: 'none', borderTop: `1px dashed ${token.colorBorderSecondary}`, margin: '14px 0' },
 
     // ---------- 通用 ----------
-    '.dd-page-title': { fontSize: 15, fontWeight: 700, marginBottom: 12 },
-    // 页面级容器留白（content 本身无内边距，由页面自行控制）
-    '.dd-page': { padding: 16 },
-    '.dd-muted': { color: token.colorTextSecondary },
+    '.dd-muted': { color: token.colorTextSecondary, fontSize: 12 },
     '.dd-scroll': { overflow: 'auto' },
     '.dd-warn-color': { color: warning },
     '.ant-table': { fontSize: 12 },
-    // 面板（实线边框）
-    '.dd-panel': { border: `1px solid ${token.colorBorder}`, borderRadius: token.borderRadius, padding: 12 },
+    '.ant-table-thead > tr > th': { fontWeight: 600, fontSize: 12, color: token.colorTextSecondary },
+    // 面板（兼容旧类名，等价 .dd-card）
+    '.dd-panel': {
+      border: `1px solid ${token.colorBorderSecondary}`,
+      borderRadius: 10,
+      background: cardBg,
+      boxShadow: cardShadow,
+      padding: 14
+    },
     // 面板（虚线边框，条件块等）
-    '.dd-panel-dashed': { border: `1px dashed ${token.colorBorderSecondary}`, borderRadius: token.borderRadius, padding: 10 },
+    '.dd-panel-dashed': { border: `1px dashed ${token.colorBorderSecondary}`, borderRadius: 8, padding: 10 },
     // 虚线分隔线
     '.dd-dashed-line': { borderBottom: `1px dashed ${token.colorBorderSecondary}` },
     // 左侧实线分隔栏
-    '.dd-split-left': { borderLeft: `1px solid ${token.colorBorder}` }
+    '.dd-split-left': { borderLeft: `1px solid ${token.colorBorderSecondary}` },
+    // 页面内 Tabs 间距收紧
+    '.dd-page .ant-tabs-nav': { marginBottom: 14 },
+    '.dd-page .ant-tabs-tab': { paddingBlock: 8 },
+    // 描述型表单标签统一为次级色
+    '.dd-form-hint': { fontSize: 12, color: token.colorTextSecondary, lineHeight: 1.7 },
+    '.dd-field-value': { fontSize: 13, fontWeight: 600, fontVariantNumeric: 'tabular-nums' }
   }
 })
