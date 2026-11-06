@@ -1,7 +1,9 @@
 /**
  * 全局状态（Zustand）：账户、主题、运行模式、Agent 状态、统一事件流订阅。
+ * 主进程访问经 lib/api（唯一类型化入口），此处不直接触碰 window.daydream。
  */
 import { create } from 'zustand'
+import { api } from './lib/api'
 import type { Account, RunMode, ThemeMode, UiEvent } from '@shared/types'
 
 interface AppState {
@@ -36,46 +38,46 @@ export const useAppStore = create<AppState>((set, get) => ({
   eventSeq: 0,
   lastEvent: null,
   async init() {
-    const accounts = await window.daydream.accounts.list()
-    const theme = await window.daydream.theme.get().catch(() => 'system' as ThemeMode)
-    const runMode = await window.daydream.runMode.get().catch(() => 'manual' as RunMode)
+    const accounts = await api.accounts.list()
+    const theme = await api.theme.get().catch(() => 'system' as ThemeMode)
+    const runMode = await api.runMode.get().catch(() => 'manual' as RunMode)
     const current = accounts[0] ?? null
     set({ accounts, currentAccount: current, theme, runMode })
-    const status = await window.daydream.agent.getStatus()
+    const status = await api.agent.getStatus()
     set({ agentActive: status.active, agentRunning: status.running })
     get().subscribeEvents()
   },
   async switchAccount(accountId: string) {
-    const account = await window.daydream.accounts.switchTo({ accountId })
+    const account = await api.accounts.switchTo({ accountId })
     set({ currentAccount: account })
   },
   async refreshAccounts() {
-    const accounts = await window.daydream.accounts.list()
+    const accounts = await api.accounts.list()
     const current = accounts.find((a) => a.id === get().currentAccount?.id) ?? accounts[0] ?? null
     set({ accounts, currentAccount: current })
   },
   async addAccount(name: string) {
-    await window.daydream.accounts.create({ name })
+    await api.accounts.create({ name })
     await get().refreshAccounts()
   },
   async startAgent() {
-    await window.daydream.agent.start()
+    await api.agent.start()
     set({ agentRunning: true })
   },
   async stopAgent() {
-    await window.daydream.agent.stop()
+    await api.agent.stop()
     set({ agentRunning: false, agentActive: false })
   },
   async setTheme(mode: ThemeMode) {
-    await window.daydream.theme.set(mode)
+    await api.theme.set(mode)
     set({ theme: mode })
   },
   async setRunMode(mode: RunMode) {
-    await window.daydream.runMode.set(mode)
+    await api.runMode.set(mode)
     set({ runMode: mode })
   },
   subscribeEvents() {
-    window.daydream.onEvent((ev) => {
+    api.onEvent((ev) => {
       if (ev.type === 'agent.status') {
         const payload = ev.payload as { running?: boolean }
         set({ agentRunning: payload.running ?? false, agentActive: true, lastEvent: ev, eventSeq: get().eventSeq + 1 })

@@ -1,8 +1,8 @@
 /**
  * 数据补数管线：数据缺失时的补数工作项（data_backfill）。
  */
-import { backfill } from '../data/pipeline'
-import { queryAll } from '../db'
+import { backfill } from '../market/pipeline'
+import { queryAll } from '../db/connection'
 import { audit } from '../services/audit'
 import { logger } from '../services/logger'
 

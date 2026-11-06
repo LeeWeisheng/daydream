@@ -16,7 +16,7 @@ export default defineConfig({
         input: {
           index: resolve(__dirname, 'src/main/index.ts'),
           // LLM 桥接服务（系统 node 运行的独立入口，SDK 仅在此子进程运行）
-          bridgeServer: resolve(__dirname, 'src/main/agent/bridgeServer.ts')
+          bridgeServer: resolve(__dirname, 'src/main/agent/bridge/server.ts')
         },
         output: { format: 'cjs', entryFileNames: '[name].js' }
       }

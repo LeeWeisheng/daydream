@@ -2,7 +2,7 @@
  * 指标库单元测试：确定性计算正确性。
  */
 import { describe, expect, it } from 'vitest'
-import { sma, ema, rsi, macd, atr, boll, momentum, volumeRatio, obv, crossDetect } from '../src/main/backtest/indicators'
+import { sma, ema, rsi, macd, atr, boll, momentum, volumeRatio, obv, crossDetect } from '../src/main/quant/backtest/indicators'
 
 describe('sma', () => {
   it('计算简单移动平均', () => {

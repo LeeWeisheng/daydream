@@ -1,24 +1,26 @@
 /**
- * 主进程入口：窗口生命周期、模块装配、Agent 闭环与调度器启动。
+ * 主进程入口：窗口生命周期（自绘标题栏）、模块装配（Runtime 组合根）、
+ * Agent 闭环与调度器启动、优雅退出（关闸 → 终止桥接 → 审计）。
  * 架构：主进程承载全部业务（Agent/数据/回测/风控/绩效/SQLite），
  * 渲染进程仅展示与交互（contextIsolation + sandbox + 白名单 IPC）。
  */
-import { app, BrowserWindow, powerMonitor, shell } from 'electron'
+import { app, BrowserWindow, nativeTheme, powerMonitor, shell } from 'electron'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { initLogger, logger } from './services/logger'
 import { initCrypto, encryptString } from './services/crypto'
-import { openDatabase, ensureAccount, getDb } from './db'
-import { registerIpcHandlers, collectAccountSnapshot } from './ipc/handlers'
+import { openDatabase, getDb } from './db/connection'
+import { registerIpcHandlers } from './ipc'
 import { startScheduler } from './scheduler'
-import { startAgentLoop, initAgentRunning, isAgentRunning, stopAgentRuntime } from './agent/loop'
-import { shutdownBridge, killBridgeSync } from './agent/llmBridge'
-import { recoverRunningWorkItems } from './agent/workitem'
+import { initRuntime, startRuntime, stopRuntime, isAgentRunning } from './runtime'
+import { killBridgeSync } from './agent/bridge/client'
 import { audit } from './services/audit'
-import { getDataStats } from './data/service'
-import { runAgentSelfTest } from './agentSelfTest'
-import { runCryptoDiagnostic, runSpawnDiagnostic } from './cryptoDiag'
-import { initTheme } from './theme'
+import { getDataStats } from './market/service'
+import { ensureAccount, seedDefaultsForExisting } from './accounts/service'
+import { getAgentRunning, getTheme } from './settings/service'
+import { runAgentSelfTest } from './diag/agentSelfTest'
+import { runCryptoDiagnostic, runSpawnDiagnostic } from './diag/cryptoDiag'
+import { collectAccountSnapshot } from './trading/service'
 
 /**
  * 配置种子：DAYDREAM_SEED_MODEL=1 时写入模型配置后退出（CLI/CI 用）。
@@ -61,7 +63,6 @@ let mainWindow: BrowserWindow | null = null
 
 function createWindow(): void {
   // 自绘标题栏：macOS 交通灯悬浮 header 左上角（hiddenInset）；Windows 无边框 + header 自绘窗口控制按钮
-  // 开发模式下使用本地图标（打包产物由 electron-builder 嵌入 exe / app bundle，无需此处处理）
   const devIcon = join(app.getAppPath(), 'resources', 'icon.png')
   const hasDevIcon = existsSync(devIcon)
   mainWindow = new BrowserWindow({
@@ -91,7 +92,6 @@ function createWindow(): void {
   mainWindow.on('enter-full-screen', () => mainWindow?.webContents.send('daydream:event', { type: 'window.fullscreen', payload: { fullscreen: true } }))
   mainWindow.on('leave-full-screen', () => mainWindow?.webContents.send('daydream:event', { type: 'window.fullscreen', payload: { fullscreen: false } }))
 
-  // 开发模式：macOS Dock 显示本地图标
   if (process.platform === 'darwin' && hasDevIcon) {
     app.dock.setIcon(devIcon)
   }
@@ -112,7 +112,6 @@ function createWindow(): void {
 /**
  * 默认开机自启动：登录系统后自动拉起 Daydream（macOS 登录项 / Windows 启动项）。
  * - 仅打包后生效：开发模式会注册 Electron 本体，污染开发机登录项；
- * - 每次启动重申默认值，用户若在系统设置中关闭，下次启动会恢复（暂无应用内开关）；
  * - 自启动只拉起应用，Agent 是否运行仍由持久化开关 agent_running 决定。
  */
 function ensureAutoLaunch(): void {
@@ -151,7 +150,6 @@ app.whenReady().then(async () => {
   logger.info('[app] starting Daydream…')
   ensureAutoLaunch()
 
-  // macOS 应用菜单「关于 Daydream」面板信息
   if (process.platform === 'darwin') {
     app.setAboutPanelOptions({
       applicationName: 'Daydream',
@@ -170,29 +168,27 @@ app.whenReady().then(async () => {
 
   const dataDir = join(app.getPath('userData'), 'data')
   initCrypto(app.getPath('userData'))
-  const db = openDatabase(dataDir)
-  void db
+  openDatabase(dataDir)
+  seedDefaultsForExisting()
+  // 主题同步（持久化于设置服务；macOS 交通灯 / Windows 自绘窗口控制随主题）
+  nativeTheme.themeSource = getTheme()
+
   const account = ensureAccount()
   if (account) {
     audit({ accountId: account.id, actor: 'system', action: 'app.start', detail: getDataStats() })
-    // 每日账户快照采集（收盘后，绩效输入）
     collectAccountSnapshot(account.id)
   }
 
-  // 崩溃恢复：重置可安全重跑的工作项
-  const recovered = recoverRunningWorkItems()
-  logger.info(`[app] recovered ${recovered.length} running workitems`)
-
   registerIpcHandlers()
-  initTheme()
-  startAgentLoop()
-  initAgentRunning()
+  // 组合根：Engine + Assessor + Executor + Outbox + Passes；恢复中断工作项，恢复运行开关
+  initRuntime()
+  startRuntime()
   startScheduler()
 
   // 系统关机/重启：同步终止桥接进程组（含 SDK 的 cli 子进程），关机过程中不再有模型请求
   powerMonitor.on('shutdown', () => {
-    logger.warn('[app] system shutdown: closing llm gate and killing bridge')
-    stopAgentRuntime()
+    logger.warn('[app] system shutdown: stopping runtime and killing bridge')
+    void stopRuntime('system shutdown')
     killBridgeSync('system shutdown')
   })
 
@@ -235,11 +231,10 @@ let quitReady = false
 /** 退出流程：关闸（禁止新请求）→ 终止桥接进程组（中断在途请求）→ 审计 → 真正退出 */
 async function shutdownAndQuit(): Promise<void> {
   const account = ensureAccount()
-  const running = isAgentRunning()
+  const running = getAgentRunning() && isAgentRunning()
   // 关闭软件时停止 Agent 运行（不修改持久化开关：用户并未点击停止，重启后恢复）
-  stopAgentRuntime()
+  await stopRuntime('app quitting')
   if (running) audit({ accountId: account?.id ?? 'global', actor: 'system', action: 'agent.stop_on_quit' })
-  await shutdownBridge('app quitting')
   if (account) audit({ accountId: account.id, actor: 'system', action: 'app.quit' })
   quitReady = true
   app.quit()
@@ -262,12 +257,12 @@ app.on('before-quit', (event) => {
 // 兜底：进程被信号/异常终止时同步杀掉桥接进程组，避免残留子进程继续请求模型
 process.on('exit', () => killBridgeSync('process exit'))
 process.on('SIGTERM', () => {
-  stopAgentRuntime()
+  void stopRuntime('SIGTERM')
   killBridgeSync('SIGTERM')
   app.quit()
 })
 process.on('SIGINT', () => {
-  stopAgentRuntime()
+  void stopRuntime('SIGINT')
   killBridgeSync('SIGINT')
   app.quit()
 })

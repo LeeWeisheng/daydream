@@ -5,12 +5,13 @@
  * 范围：持仓 ∪ 自选池；检查涨跌停接近、量能异动、指数急跌、止损/止盈线触及、信号失效。
  * 预警分级：info 仅记录 / warn 系统通知 / critical 直接生成 need_decision 汇报（均不触发 Agent 评估）。
  */
-import { nowIso, queryAll, run as dbRun } from '../db'
+import { queryAll } from '../db/connection'
 import { audit } from '../services/audit'
-import { getQuotes } from '../data/service'
-import { agentEventBus } from '../agent/events'
+import { getQuotes } from '../market/service'
 import { priceLimitRate } from '@shared/constants'
-import { addChatMessage, formatReportContent } from '../chat'
+import { raiseAlert } from '../alerts/service'
+import { expireSignal } from '../signals/service'
+import { publishReport } from '../reports/service'
 
 /** 盯盘规则阈值：止损/止盈优先取策略 DSL（Agent 预配置），其余内置 */
 interface MonitorThresholds {
@@ -34,9 +35,7 @@ function resolveThresholds(accountId: string): MonitorThresholds {
   const t = { ...DEFAULT_THRESHOLDS }
   try {
     const row = queryAll<{ dsl_json: string }>('SELECT dsl_json FROM strategy WHERE account_id = ?', [accountId])[0]
-    const dsl = JSON.parse(row.dsl_json) as {
-      exit?: { conditions?: { indicator: string; params?: Record<string, unknown> }[] }
-    }
+    const dsl = JSON.parse(row.dsl_json) as { exit?: { conditions?: { indicator: string; params?: Record<string, unknown> }[] } }
     for (const c of dsl.exit?.conditions ?? []) {
       if (c.indicator === 'stop_loss' && typeof c.params?.pct === 'number') t.stopLossPct = c.params.pct
       if (c.indicator === 'take_profit' && typeof c.params?.pct === 'number') t.takeProfitPct = c.params.pct
@@ -59,38 +58,17 @@ export async function run(accountId: string): Promise<{ alerts: number }> {
   let alerts = 0
 
   const reportAlert = (level: 'info' | 'warn' | 'critical', type: string, content: Record<string, unknown>): void => {
-    const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-    dbRun('INSERT INTO alert (id, account_id, level, type, content_json, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)', [
-      id,
-      accountId,
-      level,
-      type,
-      JSON.stringify(content),
-      'open',
-      nowIso()
-    ])
+    const alert = raiseAlert({ accountId, level, type, content })
     alerts += 1
-    // 事件仅推送 UI（loop 对 alert.triggered 不评估，零 token 消耗）
-    agentEventBus.emitAgentEvent('alert.triggered', accountId, { alertId: id, level, type }, { debounceMs: 0 })
     if (level === 'critical') {
       // 紧急预警：确定性生成 need_decision 汇报（不进 LLM），并写入首页对话流
-      const reportId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-      const now = nowIso()
-      const title = `紧急预警：${type}`
-      const summary = JSON.stringify(content)
-      dbRun('INSERT INTO report (id, account_id, level, title, summary, decision_json, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', [
-        reportId,
+      publishReport({
         accountId,
-        'need_decision',
-        title,
-        summary,
-        JSON.stringify({ kind: 'alert', alertId: id, options: ['已查看', '忽略'] }),
-        'pending',
-        now,
-        now
-      ])
-      addChatMessage({ accountId, role: 'assistant', kind: 'report', content: formatReportContent(title, summary, 'need_decision'), reportId, reportLevel: 'need_decision', reportStatus: 'pending' })
-      agentEventBus.emitAgentEvent('agent.report', accountId, { reportId, level: 'need_decision', title }, { debounceMs: 0 })
+        level: 'need_decision',
+        title: `紧急预警：${type}`,
+        summary: JSON.stringify(content),
+        decisionJson: JSON.stringify({ kind: 'alert', alertId: alert.id, options: ['已查看', '忽略'] })
+      })
     }
   }
 
@@ -113,10 +91,7 @@ export async function run(accountId: string): Promise<{ alerts: number }> {
   }
 
   // 指数急跌（当日跌幅超阈值 → 用最近两个交易日指数日线近似）
-  const idxRow = queryAll<{ close: number }>(
-    "SELECT close FROM index_daily WHERE index_code = '000300' ORDER BY date DESC LIMIT 2",
-    []
-  )
+  const idxRow = queryAll<{ close: number }>("SELECT close FROM index_daily WHERE index_code = '000300' ORDER BY date DESC LIMIT 2", [])
   if (idxRow.length >= 2) {
     const drop = idxRow[0].close / idxRow[1].close - 1
     if (drop <= -thresholds.indexDropPct) reportAlert('critical', 'index_sharp_drop', { drop })
@@ -132,7 +107,7 @@ export async function run(accountId: string): Promise<{ alerts: number }> {
     if (quote && quote.price > 0) {
       const deviation = Math.abs(quote.price - s.ref_price) / s.ref_price
       if (deviation > 0.03) {
-        dbRun("UPDATE signal SET status = 'expired', updated_at = ? WHERE id = ?", [nowIso(), s.id])
+        expireSignal(s.id)
         reportAlert('info', 'signal_invalidated', { signalId: s.id, code: s.code, deviation })
       }
     }

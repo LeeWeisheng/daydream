@@ -5,7 +5,7 @@
  * 注意：结果正文（encrypted_content）为服务端加密，不可外部处理；工具返回 text 总结与明文来源（title/url）。
  * 每次搜索消耗一次完整模型轮次（延迟与 token），并产生 Search API 计费。
  */
-import { getModelConfig } from './modelConfig'
+import { getModelConfig } from '../settings/service'
 import { assertLlmAllowed } from './llmGate'
 
 export interface WebSearchResult {

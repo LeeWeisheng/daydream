@@ -2,7 +2,7 @@
  * 风控引擎单元测试：规则检查与总体结论。
  */
 import { describe, expect, it } from 'vitest'
-import { runRiskCheck, defaultEnabledRules, type RiskCheckContext } from '../src/main/risk/engine'
+import { runRiskCheck, defaultEnabledRules, type RiskCheckContext } from '../src/main/quant/risk'
 
 function baseCtx(overrides: Partial<RiskCheckContext> = {}): RiskCheckContext {
   return {

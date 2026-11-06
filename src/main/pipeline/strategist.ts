@@ -3,14 +3,13 @@
  * 文档内嵌 ```dsl 代码块（白名单指标）作为可执行部分；新版本留档并自动创建回测工作项。
  */
 import { z } from 'zod'
-import { queryAll, run } from '../db'
 import { audit } from '../services/audit'
 import { logger } from '../services/logger'
-import { structuredOutput } from '../agent/llm'
+import { structuredOutput } from '../app/sessions'
 import { STRATEGIST_PROMPT, SYSTEM_IDENTITY } from '../agent/prompts'
-import { createWorkItem } from '../agent/workitem'
-import { saveStrategyMarkdownForAccount, getStrategyForAccountDirect } from '../agent/tools'
+import { getStrategyForAccount, latestVersionId, saveStrategyMarkdown, setStrategyStatus } from '../strategy/service'
 import { extractDslFromMarkdown } from '@shared/strategy/schema'
+import type { PipelineHost } from './index'
 
 // 生成约束：LLM 输出策略文档（Markdown + 名称）
 const genSchema = z.object({
@@ -19,11 +18,11 @@ const genSchema = z.object({
   rationale: z.string().default('')
 })
 
-export async function runFromPlan(accountId: string, context: Record<string, unknown>): Promise<Record<string, unknown>> {
+export async function runFromPlan(accountId: string, context: Record<string, unknown>, host?: PipelineHost): Promise<Record<string, unknown>> {
   const direction = String(context.direction ?? '未命名方向')
   const description = String(context.description ?? '')
   // 每账户唯一策略：读取现有文档与用户偏好（偏好仅作约束，不可修改）
-  const existing = getStrategyForAccountDirect(accountId)
+  const existing = getStrategyForAccount(accountId)
   const prompt = JSON.stringify(
     {
       direction,
@@ -51,23 +50,24 @@ export async function runFromPlan(accountId: string, context: Record<string, unk
     throw new Error('生成的策略 Markdown 缺少可执行的 ```dsl 代码块')
   }
   // 首次创建或迭代新版本（不改用户偏好）
-  const strategy = saveStrategyMarkdownForAccount(accountId, generated.name, generated.markdown, generated.rationale || String(extracted.dsl.meta.rationale ?? ''), 'agent')
+  const strategy = saveStrategyMarkdown({
+    accountId,
+    name: generated.name,
+    markdown: generated.markdown,
+    rationale: generated.rationale || String(extracted.dsl.meta.rationale ?? ''),
+    createdBy: 'agent'
+  })
   audit({ accountId, actor: 'agent', action: 'strategy.generated', target: strategy.id, detail: { direction, version: strategy.version } })
 
   // 自动创建回测工作项
-  const btItem = createWorkItem({
+  const btItem = host?.enqueueTicket({
     accountId,
     type: 'backtest',
     priority: 'medium',
     context: { strategyId: strategy.id, strategyVersionId: latestVersionId(strategy.id) ?? '', __busKey: `strategy:${strategy.id}` }
   })
-  logger.info(`[pipeline] strategy generated: ${strategy.name} v${strategy.version} (${strategy.id}), backtest workitem ${btItem.id}`)
-  return { strategyId: strategy.id, name: strategy.name, version: strategy.version, backtestWorkItemId: btItem.id }
-}
-
-function latestVersionId(strategyId: string): string | undefined {
-  const row = queryAll<{ id: string }>('SELECT id FROM strategy_version WHERE strategy_id = ? ORDER BY version DESC LIMIT 1', [strategyId])[0]
-  return row?.id
+  logger.info(`[pipeline] strategy generated: ${strategy.name} v${strategy.version} (${strategy.id}), backtest workitem ${btItem?.id ?? '-'}`)
+  return { strategyId: strategy.id, name: strategy.name, version: strategy.version, backtestWorkItemId: btItem?.id }
 }
 
 /** 供 UI/用户请求复用的入口（不依赖 LLM 时由调用方提供 Markdown） */
@@ -75,7 +75,7 @@ export function createFromMarkdown(accountId: string, name: string, markdown: st
   const extracted = extractDslFromMarkdown(markdown)
   if (extracted.errors.length > 0) throw new Error(`Markdown 校验失败: ${extracted.errors.join('; ')}`)
   if (!extracted.dsl) throw new Error('策略 Markdown 缺少可执行的 ```dsl 代码块')
-  const strategy = saveStrategyMarkdownForAccount(accountId, name, markdown, rationale, 'user')
-  run('UPDATE strategy SET status = ? WHERE id = ?', ['backtesting', strategy.id])
+  const strategy = saveStrategyMarkdown({ accountId, name, markdown, rationale, createdBy: 'user' })
+  setStrategyStatus(strategy.id, 'backtesting')
   return { strategyId: strategy.id }
 }

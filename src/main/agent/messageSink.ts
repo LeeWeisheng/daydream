@@ -6,7 +6,7 @@
  * - stream_event（增量流）、thinking_tokens、后台任务等高频噪声 → 丢弃
  */
 import type { ChatMessageKind } from '@shared/types'
-import { addChatMessage } from '../chat'
+import { addChatMessage } from '../chat/service'
 import { logger } from '../services/logger'
 
 const MAX_CONTENT_LEN = 4000 // 细节内容截断上限（防大结果撑爆 DB）
@@ -215,22 +215,19 @@ export function recordSdkMessage(accountId: string, workItemId: string | undefin
     const normalized = normalizeSdkMessage(raw)
     if (!normalized) return
     // 把调用目的合并进 meta（如 generate_strategy:xxx / evaluate:xxx），便于 UI 标注消息来源
-    let metaJson = normalized.metaJson
-    if (purpose) {
-      try {
-        const meta = metaJson ? (JSON.parse(metaJson) as Record<string, unknown>) : {}
-        meta.purpose = purpose
-        metaJson = JSON.stringify(meta)
-      } catch {
-        metaJson = JSON.stringify({ purpose })
-      }
+    let meta: Record<string, unknown> | undefined
+    try {
+      meta = normalized.metaJson ? (JSON.parse(normalized.metaJson) as Record<string, unknown>) : {}
+    } catch {
+      meta = {}
     }
+    if (purpose) meta.purpose = purpose
     addChatMessage({
       accountId,
       role: normalized.role,
       content: normalized.content,
       kind: normalized.kind,
-      metaJson,
+      meta,
       workItemId,
       sessionId: normalized.sessionId
     })

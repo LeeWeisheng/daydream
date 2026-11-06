@@ -2,9 +2,16 @@
  * 策略 DSL Schema 校验测试：非法 DSL 100% 被拒绝（白名单指标/参数/复杂度）。
  */
 import { describe, expect, it } from 'vitest'
-import { validateStrategyDsl, parseAndValidateDsl, extractDslFromMarkdown, markdownFromDsl, upsertDslBlockInMarkdown } from '../src/shared/strategy/schema'
+import {
+  validateStrategyDsl,
+  parseAndValidateDsl,
+  extractDslFromMarkdown,
+  markdownFromDsl,
+  upsertDslBlockInMarkdown,
+  type StrategyDSL
+} from '../src/shared/strategy/schema'
 
-const validDsl = {
+const validDsl: StrategyDSL = {
   meta: { name: '双均线', description: '', rationale: '', complexity: 1 },
   universe: { source: 'all_a', filters: [{ op: 'exclude_st', params: {} }] },
   entry: { logic: 'and', conditions: [{ indicator: 'ma_cross_up', params: { fast: 5, slow: 20 } }] },

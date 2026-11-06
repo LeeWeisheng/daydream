@@ -2,7 +2,7 @@
  * 回测引擎单元测试：T+1、涨跌停、费用、整手、确定性。
  */
 import { describe, expect, it } from 'vitest'
-import { runBacktest, DEFAULT_BACKTEST_PARAMS, evalCondition } from '../src/main/backtest/engine'
+import { runBacktest, DEFAULT_BACKTEST_PARAMS, evalCondition } from '../src/main/quant/backtest/engine'
 import { validateStrategyDsl } from '../src/shared/strategy/schema'
 import type { Bar } from '../src/shared/types'
 

@@ -2,19 +2,23 @@
  * 自动纠正（corrector）：依据复盘结论执行纠正动作。
  * 谱系（按强度递增）：参数微调 → 结构调整 → 暂停运行 → 停用淘汰。
  * 微调/结构调整：生成新版本 DSL 并自动回测验证，通过后替换（留档可回滚）；
- * 暂停/淘汰或涉及运行中策略：走 need_decision 人工确认。
+ * 暂停/淘汰或涉及运行中策略：走 need_decision 人工确认；
+ * 纠正完成 → correction.completed 触发（开启新一轮规划）。
  */
 import { z } from 'zod'
-import { nowIso, queryAll, run as dbRun } from '../db'
+import { nowIso, queryAll, run as dbRun } from '../db/connection'
 import { audit } from '../services/audit'
 import { logger } from '../services/logger'
-import { structuredOutput } from '../agent/llm'
+import { structuredOutput } from '../app/sessions'
 import { CORRECTOR_PROMPT, SYSTEM_IDENTITY } from '../agent/prompts'
-import { agentEventBus } from '../agent/events'
-import { createWorkItem } from '../agent/workitem'
+import { uiBus } from '../app/events'
+import { publishReport } from '../reports/service'
+import { getAutonomyLevel } from '../settings/service'
 import { parseAndValidateDsl, validateStrategyDsl, upsertDslBlockInMarkdown } from '@shared/strategy/schema'
-import { runBacktest, DEFAULT_BACKTEST_PARAMS } from '../backtest/engine'
+import { runBacktest, DEFAULT_BACKTEST_PARAMS } from '../quant/backtest/engine'
+import { getStrategyById, setStrategyStatus, latestVersionId, replaceDslWithVersion } from '../strategy/service'
 import { shanghaiDateStr, addDays } from '@shared/constants'
+import type { PipelineHost } from './index'
 
 const correctionSchema = z.object({
   action: z.enum(['tweak', 'restructure', 'pause', 'retire']),
@@ -23,7 +27,7 @@ const correctionSchema = z.object({
   newDsl: z.unknown().optional()
 })
 
-export async function run(accountId: string, context: Record<string, unknown>): Promise<Record<string, unknown>> {
+export async function run(accountId: string, context: Record<string, unknown>, host?: PipelineHost): Promise<Record<string, unknown>> {
   const strategyId = String(context.strategyId ?? '')
   const strategy = queryAll<{ id: string; name: string; dsl_json: string; markdown: string; status: string }>(
     'SELECT id, name, dsl_json, markdown, status FROM strategy WHERE id = ?',
@@ -49,8 +53,7 @@ export async function run(accountId: string, context: Record<string, unknown>): 
   })
   audit({ accountId, actor: 'agent', action: 'correction.decided', target: strategyId, detail: { action: correction.action, evidence: correction.evidence } })
 
-  const account = queryAll<{ autonomy_level: string }>('SELECT autonomy_level FROM account WHERE id = ?', [accountId])[0]
-  const autonomy = (account?.autonomy_level ?? 'conservative') as 'conservative' | 'standard' | 'aggressive'
+  const autonomy = getAutonomyLevel(accountId)
 
   switch (correction.action) {
     case 'tweak':
@@ -68,10 +71,7 @@ export async function run(accountId: string, context: Record<string, unknown>): 
           [start, end]
         )
         const stockNames = new Map(queryAll<{ code: string; name: string }>('SELECT code, name FROM stock_basic').map((r) => [r.code, r.name]))
-        const benchmark = queryAll<{ date: string; close: number }>(
-          "SELECT date, close FROM index_daily WHERE index_code = '000300' AND date >= ? AND date <= ?",
-          [start, end]
-        )
+        const benchmark = queryAll<{ date: string; close: number }>("SELECT date, close FROM index_daily WHERE index_code = '000300' AND date >= ? AND date <= ?", [start, end])
         if (klines.length === 0) throw new Error('无回测数据，无法验证纠正方案')
         const dsl = parseAndValidateDsl(newDslJson).dsl!
         const result = runBacktest(dsl, klines, stockNames, benchmark, { ...DEFAULT_BACKTEST_PARAMS, start, end })
@@ -79,38 +79,24 @@ export async function run(accountId: string, context: Record<string, unknown>): 
         if (!improved) {
           // 验证不通过：保持原策略，报告原因
           const reason = `纠正后回测不达标（总收益 ${(result.metrics.totalReturn * 100).toFixed(1)}%），保持原策略`
-          dbRun("INSERT INTO report (id, account_id, level, title, summary, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", [
-            `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-            accountId,
-            'result',
-            `纠正验证未通过：${strategy.name}`,
-            reason,
-            'closed',
-            nowIso(),
-            nowIso()
-          ])
+          publishReport({ accountId, level: 'result', title: `纠正验证未通过：${strategy.name}`, summary: reason })
           return { strategyId, applied: false, reason }
         }
-        // 新版本留档并替换（dsl_json 与 markdown 的 ```dsl 块同步更新，保留手写内容）
-        const current = queryAll<{ version: number }>('SELECT version FROM strategy WHERE id = ?', [strategyId])[0]
-        const next = (current?.version ?? 0) + 1
+        // 新版本留档并替换（dsl_json 与 markdown 的 ```dsl 块同步更新，保留手写内容；经策略服务唯一写者）
         const newMarkdown = upsertDslBlockInMarkdown(strategy.markdown, dsl)
-        dbRun('UPDATE strategy SET dsl_json = ?, markdown = ?, version = ?, updated_at = ? WHERE id = ?', [newDslJson, newMarkdown, next, nowIso(), strategyId])
-        dbRun('INSERT INTO strategy_version (id, strategy_id, version, dsl_json, markdown, change_log, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)', [
-          `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-          strategyId,
-          next,
-          newDslJson,
-          newMarkdown,
-          `纠正（${correction.action}）: ${correction.reasoning}`,
-          nowIso()
-        ])
+        const { version: next } = replaceDslWithVersion(strategyId, newDslJson, newMarkdown, `纠正（${correction.action}）: ${correction.reasoning}`)
         audit({ accountId, actor: 'agent', action: 'correction.applied', target: strategyId, detail: { action: correction.action, version: next } })
-        agentEventBus.emitAgentEvent('strategy.updated', accountId, { strategyId, version: next }, { debounceMs: 0 })
+        uiBus.broadcast('strategy.updated', { accountId, strategyId, version: next })
+        host?.enqueueTicket({
+          accountId,
+          type: 'backtest',
+          priority: 'medium',
+          context: { strategyId, strategyVersionId: latestVersionId(strategyId) ?? '', __busKey: `strategy:${strategyId}` }
+        })
         return { strategyId, applied: true, version: next, action: correction.action }
       }
       // 无 newDsl：转为生成策略工作项（结构调整路径）
-      createWorkItem({
+      host?.enqueueTicket({
         accountId,
         type: 'generate_strategy',
         priority: 'medium',
@@ -121,7 +107,7 @@ export async function run(accountId: string, context: Record<string, unknown>): 
     case 'pause': {
       // 暂停运行：激进模式自动执行；其余走人工确认
       if (autonomy === 'aggressive') {
-        dbRun("UPDATE strategy SET status = 'paused', updated_at = ? WHERE id = ?", [nowIso(), strategyId])
+        setStrategyStatus(strategyId, 'paused')
         audit({ accountId, actor: 'agent', action: 'correction.paused', target: strategyId })
         return { strategyId, applied: true, action: 'pause' }
       }
@@ -130,7 +116,7 @@ export async function run(accountId: string, context: Record<string, unknown>): 
     case 'retire': {
       // 淘汰：保守/标准需人工确认；激进自动
       if (autonomy === 'aggressive') {
-        dbRun("UPDATE strategy SET status = 'deactivated', updated_at = ? WHERE id = ?", [nowIso(), strategyId])
+        setStrategyStatus(strategyId, 'deactivated')
         dbRun("UPDATE run_instance SET status = 'stopped', stopped_at = ? WHERE strategy_id = ? AND status = 'active'", [nowIso(), strategyId])
         audit({ accountId, actor: 'agent', action: 'correction.retired', target: strategyId })
         return { strategyId, applied: true, action: 'retire' }
@@ -154,27 +140,14 @@ function requestApproval(
   correction: { action: string; reasoning: string; evidence: string },
   action: string
 ): Record<string, unknown> {
-  const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-  const now = nowIso()
-  const strategy = queryAll<{ name: string }>('SELECT name FROM strategy WHERE id = ?', [strategyId])[0]
-  dbRun('INSERT INTO report (id, account_id, level, title, summary, decision_json, status, work_item_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', [
-    id,
+  const strategy = getStrategyById(strategyId)
+  const result = publishReport({
     accountId,
-    'need_decision',
-    `纠正方案待确认：${action === 'pause' ? '暂停' : '淘汰'}「${strategy?.name ?? strategyId}」`,
-    `${correction.reasoning}\n证据：${correction.evidence}`,
-    JSON.stringify({ kind: `correct_${action}`, strategyId, options: ['批准', '驳回', '暂缓'] }),
-    'pending',
-    null,
-    now,
-    now
-  ])
-  agentEventBus.emitAgentEvent('agent.report', accountId, { reportId: id, level: 'need_decision', title: `纠正方案待确认` }, { debounceMs: 0 })
+    level: 'need_decision',
+    title: `纠正方案待确认：${action === 'pause' ? '暂停' : '淘汰'}「${strategy?.name ?? strategyId}」`,
+    summary: `${correction.reasoning}\n证据：${correction.evidence}`,
+    decisionJson: JSON.stringify({ kind: `correct_${action}`, strategyId, options: ['批准', '驳回', '暂缓'] })
+  })
   logger.info(`[pipeline] correction ${action} approval requested for ${strategyId}`)
-  return { strategyId, applied: false, pendingApproval: id }
-}
-
-/** 纠正完成事件：开启新一轮规划 */
-export function emitCorrectionCompleted(accountId: string): void {
-  agentEventBus.emitAgentEvent('correction.completed', accountId, {}, { debounceMs: 0 })
+  return { strategyId, applied: false, pendingApproval: result.reportId }
 }
