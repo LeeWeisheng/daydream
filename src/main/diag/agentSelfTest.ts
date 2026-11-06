@@ -13,7 +13,6 @@ import { decryptString } from '../services/crypto'
 import { structuredOutput, runAgentTurn, isModelConfigured } from '../app/sessions'
 import { setLlmRunning } from '../agent/llmGate'
 import { deepseekWebSearch } from '../agent/webSearch'
-import { SYSTEM_IDENTITY } from '../agent/prompts'
 
 const echoSchema = z.object({
   answer: z.string(),
@@ -45,7 +44,7 @@ export async function runAgentSelfTest(): Promise<number> {
   // 1) structuredOutput（flash）
   try {
     const r1 = await structuredOutput(account.id, {
-      system: `${SYSTEM_IDENTITY}\n输出 JSON。`,
+      system: '输出 JSON。',
       prompt: '用 JSON 回答：1+1 等于几？confidence 取 0~1。',
       schema: echoSchema,
       purpose: 'selftest:echo'
@@ -59,7 +58,7 @@ export async function runAgentSelfTest(): Promise<number> {
   // 2) structuredOutput with useProModel（pro）
   try {
     const r2 = await structuredOutput(account.id, {
-      system: `${SYSTEM_IDENTITY}\n输出 JSON。`,
+      system: '输出 JSON。',
       prompt: '用 JSON 回答：A 股主板股票每日涨跌幅限制是多少？confidence 取 0~1。',
       schema: echoSchema,
       purpose: 'selftest:echo_pro',
@@ -85,7 +84,7 @@ export async function runAgentSelfTest(): Promise<number> {
   // 4) runAgentTurn：让模型调用工具（web_search + get_market_breadth）
   try {
     const reply = await runAgentTurn(account.id, {
-      system: `${SYSTEM_IDENTITY}\n本次任务是自测：请依次调用 web_search（搜索"今日A股行情"）与 get_market_breadth 工具，然后用一段话总结你获取到的信息。`,
+      system: '本次任务是自测：请依次调用 web_search（搜索"今日A股行情"）与 get_market_breadth 工具，然后用一段话总结你获取到的信息。',
       prompt: '请执行自测：先用 web_search 搜索今日 A 股行情，再调用 get_market_breadth，最后总结。',
       purpose: 'selftest:agent_turn',
       maxSteps: 8

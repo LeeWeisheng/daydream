@@ -14,6 +14,7 @@ import { logger } from '../services/logger'
 import { bridgeAgentTurn, bridgeStructuredOutput } from '../agent/bridge/client'
 import { isModelConfigured } from '../settings/service'
 import { assertLlmAllowed, isLlmGateOpen, LlmBlockedError } from '../agent/llmGate'
+import { buildAgentSystemPrompt } from '../agent/prompts'
 
 export { isModelConfigured, LlmBlockedError }
 
@@ -40,6 +41,7 @@ function safeJsonParse(text: string): unknown {
 
 /**
  * 结构化输出：桥接子进程 outputFormat(json_schema) + Zod Schema 校验，失败自动重试。
+ * 系统提示词统一注入当前账户生效策略文档（身份 + 策略 + 任务提示）。
  */
 export async function structuredOutput<T>(
   accountId: string,
@@ -60,10 +62,12 @@ export async function structuredOutput<T>(
     // 每次尝试前过闸：停止运行/退出后不再发起任何模型请求
     assertLlmAllowed(accountId, opts.purpose)
     try {
+      // 重试时把上次校验失败原因附到 prompt，提高模型修正命中率
+      const retryHint = attempt > 0 && lastError ? `\n\n【上一次输出校验失败，请修正后重试】${lastError.message}` : ''
       const result = await bridgeStructuredOutput({
         accountId,
-        system: opts.system,
-        prompt: opts.prompt,
+        system: buildAgentSystemPrompt(accountId, opts.system),
+        prompt: `${opts.prompt}${retryHint}`,
         jsonSchema,
         purpose: opts.purpose,
         useProModel: opts.useProModel,
@@ -89,6 +93,7 @@ export async function structuredOutput<T>(
 /**
  * Agent 会话执行：桥接子进程内建 agentic loop（工具循环，maxTurns 上限）。
  * 业务工具经 RPC 回主进程执行，权限仅放行自有工具。
+ * 系统提示词统一注入当前账户生效策略文档（身份 + 策略 + 任务提示）。
  */
 export async function runAgentTurn(
   accountId: string,
@@ -105,7 +110,7 @@ export async function runAgentTurn(
   try {
     const result = await bridgeAgentTurn({
       accountId,
-      system: opts.system,
+      system: buildAgentSystemPrompt(accountId, opts.system),
       prompt: opts.prompt,
       purpose: opts.purpose,
       maxSteps: opts.maxSteps,

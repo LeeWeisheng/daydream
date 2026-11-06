@@ -252,7 +252,7 @@ export default function Settings(): React.ReactNode {
         {data?.modelConfigured ? (
           <Alert type="success" showIcon message="模型已配置：Agent 决策闭环可正常运行。" style={{ marginBottom: 12 }} />
         ) : (
-          <Alert type="warning" showIcon message="模型未配置：Agent 决策闭环不运行（数据 / 回测 / 资金功能不受影响）。" style={{ marginBottom: 12 }} />
+          <Alert type="warning" showIcon message="模型未配置：Agent 决策闭环不运行（数据 / 策略 / 资金功能不受影响）。" style={{ marginBottom: 12 }} />
         )}
         <Form layout="vertical" size="small">
           <div className="dd-form-grid">

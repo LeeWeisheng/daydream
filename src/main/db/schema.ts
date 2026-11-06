@@ -7,7 +7,7 @@ import type { Database } from 'better-sqlite3'
 import { logger } from '../services/logger'
 import { DEFAULT_INITIAL_CASH, DEFAULT_PREFERENCES } from '@shared/constants'
 
-export const SCHEMA_VERSION = 5
+export const SCHEMA_VERSION = 6
 
 interface Migration {
   version: number
@@ -294,6 +294,41 @@ CREATE TABLE IF NOT EXISTS effect (
   due_at TEXT NOT NULL,
   UNIQUE(kind, key)
 );
+`
+  },
+  {
+    // v6（本次重构）：策略彻底 Markdown 化——移除 DSL 结构与偏好 JSON（偏好并入文档文本），
+    // 增加标题（大模型生成）、版本统计（本金/盈亏/盈亏比/胜率）与用户指定的生效版本。
+    // 策略无审核流：保存即生效，默认使用最新版本，用户可指定其它版本。
+    version: 6,
+    sql: `
+CREATE TABLE strategy_new (
+  id TEXT PRIMARY KEY, account_id TEXT NOT NULL, title TEXT NOT NULL,
+  version INTEGER NOT NULL DEFAULT 1, markdown TEXT NOT NULL DEFAULT '',
+  active_version_id TEXT,
+  created_by TEXT NOT NULL DEFAULT 'agent',
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+INSERT INTO strategy_new (id, account_id, title, version, markdown, active_version_id, created_by, created_at, updated_at)
+  SELECT id, account_id, name, version, COALESCE(markdown, ''), NULL, created_by, created_at, updated_at FROM strategy;
+DROP TABLE strategy;
+ALTER TABLE strategy_new RENAME TO strategy;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_strategy_account ON strategy(account_id);
+
+CREATE TABLE strategy_version_new (
+  id TEXT PRIMARY KEY, strategy_id TEXT NOT NULL, version INTEGER NOT NULL,
+  title TEXT NOT NULL DEFAULT '', markdown TEXT NOT NULL DEFAULT '',
+  change_log TEXT NOT NULL DEFAULT '', stats_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL
+);
+INSERT INTO strategy_version_new (id, strategy_id, version, title, markdown, change_log, created_at)
+  SELECT id, strategy_id, version, '', COALESCE(markdown, ''), change_log, created_at FROM strategy_version;
+DROP TABLE strategy_version;
+ALTER TABLE strategy_version_new RENAME TO strategy_version;
+CREATE INDEX IF NOT EXISTS idx_strategy_version_sid ON strategy_version(strategy_id);
+
+-- 策略无审核流：取消存量 activate（上线）工作项，避免执行器报未知类型
+UPDATE work_item SET status = 'cancelled' WHERE type = 'activate';
 `
   }
 ]

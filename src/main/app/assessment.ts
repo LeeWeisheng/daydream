@@ -12,7 +12,7 @@ import type { Policy } from '../core/ports'
 import { effects } from './effects'
 import { structuredOutput } from './sessions'
 import { buildContextSummary } from './context'
-import { EVALUATION_PROMPT, SYSTEM_IDENTITY } from '../agent/prompts'
+import { EVALUATION_PROMPT } from '../agent/prompts'
 import { audit } from '../services/audit'
 import { logger } from '../services/logger'
 
@@ -71,7 +71,7 @@ export class MasterAssessor {
     let evaluation: Evaluation
     try {
       evaluation = await structuredOutput(accountId, {
-        system: `${SYSTEM_IDENTITY}\n\n${EVALUATION_PROMPT}`,
+        system: EVALUATION_PROMPT,
         prompt: JSON.stringify(input, null, 2),
         schema: evaluationSchema,
         purpose: `evaluate:${evalItem.triggers.map((t) => t.type).join(',')}`

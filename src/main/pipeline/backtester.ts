@@ -1,22 +1,17 @@
 /**
- * 自动回测（backtester）：调用确定性回测引擎，LLM 评估报告给出
- * 通过/不通过/需调整 结论；通过则入队 activate 工作项（需人工批准）。
- * 引擎为纯函数；此处直接调用（数据量受限时可迁移至 Worker，接口不变）。
+ * 策略评估（backtester）：策略为纯文本文档，无法确定性回测；
+ * 本环节由 LLM 做定性评估（逻辑自洽性、可执行性、与用户偏好一致性、当前市场适用性），
+ * 结论留档并推送；策略无审核流，评估结论仅供 Agent 迭代参考。
  */
 import { z } from 'zod'
-import type { Strategy } from '@shared/types'
-import { getDb, newId, nowIso, queryAll, run, inTransaction } from '../db/connection'
+import { newId, nowIso, run, inTransaction } from '../db/connection'
 import { audit } from '../services/audit'
 import { logger } from '../services/logger'
 import { structuredOutput } from '../app/sessions'
-import { BACKTEST_EVALUATOR_PROMPT, SYSTEM_IDENTITY } from '../agent/prompts'
+import { BACKTEST_EVALUATOR_PROMPT } from '../agent/prompts'
 import { uiBus } from '../app/events'
-import { parseAndValidateDsl } from '@shared/strategy/schema'
-import { runBacktest, DEFAULT_BACKTEST_PARAMS } from '../quant/backtest/engine'
-import { getDailyKline, getIndexDaily } from '../market/service'
-import { setStrategyStatus } from '../strategy/service'
-import { publishReport } from '../reports/service'
-import { shanghaiDateStr, addDays } from '@shared/constants'
+import { getMarketBrief } from '../market/service'
+import { computeAccountStats, getStrategyById, listVersions } from '../strategy/service'
 
 const evaluationSchema = z.object({
   verdict: z.enum(['pass', 'fail', 'adjust']),
@@ -26,136 +21,48 @@ const evaluationSchema = z.object({
 
 export async function runBacktestWorkItem(accountId: string, context: Record<string, unknown>): Promise<Record<string, unknown>> {
   const strategyId = String(context.strategyId ?? '')
-  // 策略全局共享：查询不按账户过滤
-  const strategyRow = queryAll<Strategy & Record<string, unknown>>('SELECT * FROM strategy WHERE id = ?', [strategyId])[0]
-  if (!strategyRow) throw new Error(`策略不存在: ${strategyId}`)
-  const strategy = { ...strategyRow, dsl_json: String(strategyRow.dsl_json ?? '') }
-  if (!strategy.dsl_json.trim()) throw new Error('策略 Markdown 中无可执行的 ```dsl 代码块，无法回测')
-  const { dsl, errors } = parseAndValidateDsl(strategy.dsl_json)
-  if (!dsl || errors.length > 0) throw new Error(`策略 DSL 非法: ${errors.join('; ')}`)
+  const strategy = getStrategyById(strategyId)
+  if (!strategy) throw new Error(`策略不存在: ${strategyId}`)
+  // 评估对象：指定版本，缺省为最新版本
+  const versionId = String(context.strategyVersionId ?? '')
+  const versions = listVersions(strategyId)
+  const version = versionId ? versions.find((v) => v.id === versionId) : versions[0]
+  if (!version) throw new Error(`策略版本不存在: ${versionId}`)
 
-  setStrategyStatus(strategyId, 'backtesting')
-
-  // 回测区间：近 3 年（前 2 年样本内 + 最近 1 年样本外），与初建数据深度一致
-  const end = shanghaiDateStr()
-  const start = addDays(end, -Math.round(3 * 365))
-  const sampleOutStart = addDays(end, -365)
-
-  const klines = queryAll<Parameters<typeof runBacktest>[1][number]>(
-    'SELECT code, date, open, high, low, close, volume, amount, adj_factor as adjFactor FROM kline_daily WHERE date >= ? AND date <= ?',
-    [start, end]
-  )
-  if (klines.length === 0) throw new Error('本地无 K 线数据，请先完成数据初始化')
-  const stockNames = new Map(queryAll<{ code: string; name: string }>('SELECT code, name FROM stock_basic').map((r) => [r.code, r.name]))
-  const benchmark = getIndexDaily('000300', start, end).map((b) => ({ date: b.date, close: b.close }))
-
-  const params = { ...DEFAULT_BACKTEST_PARAMS, start, end }
-  const result = runBacktest(dsl, klines, stockNames, benchmark, params)
-
-  // 样本外分段：重跑最近 1 年
-  let sampleMetrics = undefined
-  if (sampleOutStart > start) {
-    const outKlines = klines.filter((k) => k.date >= sampleOutStart)
-    const outBench = benchmark.filter((b) => b.date >= sampleOutStart)
-    if (outKlines.length > 30) {
-      const outResult = runBacktest(dsl, outKlines, stockNames, outBench, { ...params, start: sampleOutStart })
-      sampleMetrics = outResult.metrics
-    }
-  }
+  const marketBrief = await getMarketBrief()
+  const stats = computeAccountStats(accountId)
+  const evaluation = await structuredOutput(accountId, {
+    system: BACKTEST_EVALUATOR_PROMPT,
+    prompt: JSON.stringify(
+      {
+        strategy: { title: version.title || strategy.title, version: version.version, markdown: version.markdown },
+        accountStats: stats,
+        marketBrief,
+        note: '策略为纯文本，无法确定性回测；请做定性评估。'
+      },
+      null,
+      2
+    ),
+    schema: evaluationSchema,
+    purpose: `strategy_eval:${strategyId}`,
+    useProModel: true
+  })
 
   const runId = newId()
-  const metricsJson = JSON.stringify(result.metrics)
-  const equityJson = JSON.stringify(result.equity)
-  const reportJson = JSON.stringify({ inSample: result.metrics, outOfSample: sampleMetrics, params })
   inTransaction(() => {
     run('UPDATE strategy SET updated_at = ? WHERE id = ?', [nowIso(), strategyId])
-    run('INSERT INTO backtest_run (id, strategy_version_id, params_json, status, metrics_json, equity_json, report_json, created_at, finished_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', [
-      runId,
-      String(context.strategyVersionId ?? ''),
-      JSON.stringify(params),
-      'succeeded',
-      metricsJson,
-      equityJson,
-      reportJson,
-      nowIso(),
-      nowIso()
-    ])
-    const insertTrade = getDb().prepare('INSERT INTO backtest_trade (run_id, code, side, price, qty, fee, traded_at, pnl, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
-    for (const t of result.trades) {
-      insertTrade.run(runId, t.code, t.side, t.price, t.qty, t.fee, t.tradedAt, t.pnl ?? null, t.note ?? null)
-    }
+    run(
+      'INSERT INTO backtest_run (id, strategy_version_id, params_json, status, metrics_json, equity_json, report_json, created_at, finished_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [runId, version.id, '{}', 'succeeded', null, null, JSON.stringify({ evaluation, kind: 'qualitative' }), nowIso(), nowIso()]
+    )
   })
-
-  // LLM 评估回测报告
-  const evaluation = await structuredOutput(accountId, {
-    system: `${SYSTEM_IDENTITY}\n\n${BACKTEST_EVALUATOR_PROMPT}`,
-    prompt: JSON.stringify({ strategy: { name: strategy.name, dsl }, metrics: result.metrics, sampleMetrics }, null, 2),
-    schema: evaluationSchema,
-    purpose: `backtest_eval:${strategyId}`
-  })
-  run('UPDATE backtest_run SET report_json = ? WHERE id = ?', [JSON.stringify({ ...JSON.parse(reportJson), evaluation }), runId])
-  audit({ accountId, actor: 'agent', action: 'backtest.evaluated', target: runId, detail: { strategyId, verdict: evaluation.verdict } })
-
+  audit({ accountId, actor: 'agent', action: 'strategy.evaluated', target: runId, detail: { strategyId, version: version.version, verdict: evaluation.verdict } })
   uiBus.broadcast('backtest.completed', { accountId, runId, strategyId, verdict: evaluation.verdict })
 
   if (evaluation.verdict === 'pass') {
-    // 通过：进入待批准，发布 need_decision 汇报（人工批准；自动模式由汇报服务自动批准执行）
-    setStrategyStatus(strategyId, 'pending_approval')
-    const { reportId, autoApproved } = publishReport({
-      accountId,
-      level: 'need_decision',
-      title: `策略「${strategy.name}」回测达标，申请上线`,
-      summary: evaluation.summary,
-      decisionJson: JSON.stringify({ kind: 'activate', strategyId, options: ['批准', '驳回', '暂缓'] })
-    })
-    return { runId, verdict: evaluation.verdict, reportId, autoApproved, summary: evaluation.summary }
+    return { runId, verdict: evaluation.verdict, summary: evaluation.summary }
   }
-  // fail / adjust：保持 draft，等待调整（评估环节可再生成）
-  setStrategyStatus(strategyId, 'draft')
+  // fail/adjust：评估不通过，仅提示 Agent 迭代（策略已生效，无审核流）
+  logger.info(`[backtest] strategy ${strategyId} eval: ${evaluation.verdict} — ${evaluation.reason}`)
   return { runId, verdict: evaluation.verdict, summary: evaluation.summary, note: evaluation.verdict === 'adjust' ? '需调整，可重新生成策略' : undefined }
-}
-
-/** IPC/工具触发的回测任务入口（异步执行 + 状态流转） */
-export async function startBacktestTask(accountId: string, strategyVersionId: string, start: string, end: string): Promise<string> {
-  const version = queryAll<{ strategy_id: string }>('SELECT strategy_id FROM strategy_version WHERE id = ?', [strategyVersionId])[0]
-  if (!version) throw new Error('策略版本不存在')
-  const runId = newId()
-  run('INSERT INTO backtest_run (id, strategy_version_id, params_json, status, created_at) VALUES (?, ?, ?, ?, ?)', [
-    runId,
-    strategyVersionId,
-    JSON.stringify({ start, end }),
-    'running',
-    nowIso()
-  ])
-  // 异步执行
-  ;(async () => {
-    try {
-      // 策略全局共享：查询不按账户过滤
-      const strategyRow = queryAll<Strategy & Record<string, unknown>>('SELECT * FROM strategy WHERE id = ?', [version.strategy_id])[0]
-      if (!strategyRow) throw new Error('策略不存在')
-      const dslJson = String(strategyRow.dsl_json ?? '')
-      if (!dslJson.trim()) throw new Error('策略 Markdown 中无可执行的 ```dsl 代码块，无法回测')
-      const { dsl, errors } = parseAndValidateDsl(dslJson)
-      if (!dsl) throw new Error(errors.join('; '))
-      const klines = queryAll<Parameters<typeof runBacktest>[1][number]>(
-        'SELECT code, date, open, high, low, close, volume, amount, adj_factor as adjFactor FROM kline_daily WHERE date >= ? AND date <= ?',
-        [start, end]
-      )
-      const stockNames = new Map(queryAll<{ code: string; name: string }>('SELECT code, name FROM stock_basic').map((r) => [r.code, r.name]))
-      const benchmark = getIndexDaily('000300', start, end).map((b) => ({ date: b.date, close: b.close }))
-      const result = runBacktest(dsl, klines, stockNames, benchmark, { ...DEFAULT_BACKTEST_PARAMS, start, end })
-      run('UPDATE backtest_run SET status = ?, metrics_json = ?, equity_json = ?, report_json = ?, finished_at = ? WHERE id = ?', [
-        'succeeded',
-        JSON.stringify(result.metrics),
-        JSON.stringify(result.equity),
-        JSON.stringify({ params: { start, end } }),
-        nowIso(),
-        runId
-      ])
-      uiBus.broadcast('backtest.completed', { accountId, runId, strategyId: version.strategy_id })
-    } catch (e) {
-      run('UPDATE backtest_run SET status = ?, error = ?, finished_at = ? WHERE id = ?', ['failed', (e as Error).message, nowIso(), runId])
-    }
-  })().catch((e) => logger.error(`[backtest] task ${runId} crashed: ${(e as Error).message}`))
-  return runId
 }

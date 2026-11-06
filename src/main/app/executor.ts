@@ -12,7 +12,7 @@ import type { Ticket } from '../core/model'
 import { effects, Later } from './effects'
 import { llmTraceContext, runAgentTurn, LlmBlockedError } from './sessions'
 import { isLlmGateOpen } from '../agent/llmGate'
-import { SYSTEM_IDENTITY, USER_CHAT_PROMPT } from '../agent/prompts'
+import { USER_CHAT_PROMPT } from '../agent/prompts'
 import { audit } from '../services/audit'
 import { logger } from '../services/logger'
 import * as pipelines from '../pipeline'
@@ -154,8 +154,6 @@ export class WorkItemExecutor {
         return pipelines.strategyGen.runFromPlan(ticket.accountId, ticket.context, host)
       case 'backtest':
         return pipelines.backtestPipeline.runBacktestWorkItem(ticket.accountId, ticket.context)
-      case 'activate':
-        return pipelines.runnerPipeline.activateStrategy(ticket.accountId, ticket.context)
       case 'monitor_review':
         return pipelines.monitorPipeline.run(ticket.accountId)
       case 'review_daily':
@@ -172,7 +170,7 @@ export class WorkItemExecutor {
         const message = String(ticket.context.message ?? '')
         if (!message) return { skipped: true }
         const text = await runAgentTurn(ticket.accountId, {
-          system: `${SYSTEM_IDENTITY}\n\n${USER_CHAT_PROMPT}`,
+          system: USER_CHAT_PROMPT,
           prompt: message,
           purpose: 'user_request'
         })

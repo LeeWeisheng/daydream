@@ -54,71 +54,54 @@ export interface IndexDaily extends Omit<Bar, 'code' | 'adjFactor'> {
   indexCode: string
 }
 
-// ---------- 策略 ----------
-export type StrategyStatus =
-  | 'draft'
-  | 'backtesting'
-  | 'pending_approval'
-  | 'active'
-  | 'paused'
-  | 'deactivated'
+// ---------- 策略（Markdown 纯文本，注入 Agent 系统提示词） ----------
 
-export interface Strategy {
-  id: string
-  accountId: string
-  name: string
-  version: number
-  /** 策略文档（Markdown 主载体，可含 ```dsl 代码块作为可执行部分；用户与 Agent 均可改） */
-  markdown: string
-  /** 可执行 DSL（由 markdown 的 ```dsl 块提取同步，供确定性执行引擎消费；无块时为空串） */
-  dslJson: string
-  /** 用户偏好（每账户唯一策略 = 策略文档 + 用户偏好）；仅用户可改 */
-  preferencesJson: string
-  status: StrategyStatus
-  createdBy: string
-  rationale: string
-  createdAt: string
+/** 策略版本统计：本金、盈亏、盈亏比、胜率（版本创建时快照，运行后刷新） */
+export interface StrategyStats {
+  /** 本金（账户初始资金） */
+  principal: number
+  /** 累计已实现盈亏（成交记录配对计算） */
+  totalPnl: number
+  /** 盈亏比（平均盈利 / 平均亏损；无亏损时 0） */
+  profitLossRatio: number
+  /** 胜率（盈利交易 / 已平仓交易） */
+  winRate: number
+  /** 成交记录条数（买入+卖出全部成交行） */
+  tradeCount: number
+  /** 统计更新时间 */
   updatedAt: string
 }
 
-// ---------- 用户偏好（策略的一部分） ----------
-export type RiskTolerance = 'conservative' | 'moderate' | 'aggressive'
-export type InvestmentStyle = 'value' | 'growth' | 'trend' | 'blend'
-export type HoldingPeriod = 'short' | 'swing' | 'long'
-export type TradeFrequency = 'low' | 'medium' | 'high'
-
-export interface NotifyPrefs {
-  signals: boolean
-  alerts: boolean
-  summaries: boolean
-  quietHours: string
-}
-
-export interface StrategyPreferences {
-  riskTolerance: RiskTolerance
-  investmentStyle: InvestmentStyle
-  expectedAnnualReturn: number
-  maxDrawdownTolerance: number
-  holdingPeriod: HoldingPeriod
-  preferredIndustries: string[]
-  excludedIndustries: string[]
-  maxPositions: number
-  maxPositionPct: number
-  maxTotalPositionPct: number
-  tradeFrequency: TradeFrequency
-  autonomyLevel: AutonomyLevel
-  notify: NotifyPrefs
-}
-
+/** 策略版本：完整 Markdown 策略文档留档（版本号单调递增，不可变） */
 export interface StrategyVersion {
   id: string
   strategyId: string
   version: number
-  /** 该版本的策略文档（Markdown） */
+  /** 简短标题（Agent 更新时由大模型生成） */
+  title: string
+  /** 该版本的策略文档（Markdown 纯文本：交易策略 + 用户偏好等全部信息） */
   markdown: string
-  dslJson: string
+  /** 一句话变更记录 */
   changeLog: string
+  /** 版本统计（本金/盈亏/盈亏比/胜率），JSON 字符串 */
+  statsJson: string
   createdAt: string
+}
+
+export interface Strategy {
+  id: string
+  accountId: string
+  /** 简短标题（大模型生成） */
+  title: string
+  /** 当前最新版本号（单调递增） */
+  version: number
+  /** 最新版本的策略文档（Markdown 纯文本，注入 Agent 系统提示词） */
+  markdown: string
+  /** 用户指定生效的版本 id；null = 默认使用最新版本 */
+  activeVersionId: string | null
+  createdBy: string
+  createdAt: string
+  updatedAt: string
 }
 
 // ---------- 回测 ----------
@@ -248,7 +231,6 @@ export type WorkItemType =
   | 'plan'
   | 'generate_strategy'
   | 'backtest'
-  | 'activate'
   | 'monitor_review'
   | 'review_daily'
   | 'review_weekly'

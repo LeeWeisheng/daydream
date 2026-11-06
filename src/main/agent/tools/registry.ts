@@ -2,21 +2,20 @@
  * Agent 工具执行层（主进程侧）：按工具名分发执行（LLM 桥接子进程经 RPC 调用）。
  * 规则（docs《系统规则与账户模型》§5/§6）：
  * - 权限白名单：仅放行自有工具（bridge 侧 canUseTool 强制）；
- * - 受限操作（activate / deactivate / publish_signal）按自主级别与批准流程控制；
- * - 所有业务读写经服务层（单写者），工具不再直写 SQL。
+ * - 所有业务读写经服务层（单写者），工具不再直写 SQL；
+ * - 策略为 Markdown 纯文本，Agent 可读（get_strategy）可改（update_strategy，新版本立即生效）。
  */
 import type { Signal, Strategy } from '@shared/types'
-import { extractDslFromMarkdown } from '@shared/strategy/schema'
-import { getDb, nowIso, queryAll, run } from '../../db/connection'
-import { audit } from '../../services/audit'
+import { getDb, queryAll } from '../../db/connection'
 import * as marketService from '../../market/service'
 import { dailyUpdate } from '../../market/pipeline'
 import { deepseekWebSearch } from '../webSearch'
-import { isAutoMode } from '../../settings/service'
 import {
+  computeAccountStats,
+  getEffectiveVersion,
   getStrategyForAccount,
-  saveStrategyMarkdown,
-  setStrategyStatus
+  listVersions,
+  saveStrategyMarkdown
 } from '../../strategy/service'
 import { checkRiskForSignal } from '../../signals/service'
 import { publishSignal } from '../../signals/service'
@@ -81,92 +80,53 @@ export async function executeToolCall(accountId: string, toolName: string, args:
     case 'web_search':
       return deepseekWebSearch(account, arg('query'))
 
-    // —— 策略管理（每账户唯一一份；偏好只读，仅用户可改） ——
-    case 'create_strategy': {
-      const existing = getStrategyForAccount(account)
-      if (existing) throw new Error('账户已有唯一策略，请使用 update_strategy 迭代')
-      // Agent 创建的策略必须含可执行 ```dsl 块（闭环完整性：生成 → 回测 → 运行）
-      const md = arg('markdown')
-      const extracted = extractDslFromMarkdown(md)
-      if (extracted.errors.length > 0) throw new Error(`策略 Markdown 校验失败: ${extracted.errors.join('; ')}`)
-      if (!extracted.dsl) throw new Error('策略 Markdown 缺少可执行的 ```dsl 代码块')
-      const s = saveStrategyMarkdown({ accountId: account, name: arg('name'), markdown: md, rationale: arg('rationale'), createdBy: 'agent' })
-      return { id: s.id, name: s.name, status: s.status }
-    }
-    case 'update_strategy': {
-      const md = arg('markdown')
-      const extracted = extractDslFromMarkdown(md)
-      if (extracted.errors.length > 0) throw new Error(`策略 Markdown 校验失败: ${extracted.errors.join('; ')}`)
-      const s = saveStrategyMarkdown({ accountId: account, name: arg('name') || undefined, markdown: md, rationale: arg('rationale'), createdBy: 'agent' })
-      return { strategyId: s.id, version: s.version, executable: Boolean(extracted.dsl) }
-    }
-    case 'list_strategies':
+    // —— 策略管理（每账户唯一一份 Markdown 纯文本策略；Agent 可读可改，新版本立即生效） ——
     case 'get_strategy': {
       const s = getStrategyForAccount(account)
-      return s
-        ? { id: s.id, name: s.name, version: s.version, status: s.status, markdown: s.markdown, dslJson: s.dslJson, preferencesJson: s.preferencesJson, rationale: s.rationale }
-        : null
-    }
-    case 'activate_strategy': {
-      // 自动模式（策略验证）：直接激活，无需人工批准；手动模式：发布 need_decision 汇报
-      const strategyId = arg('strategyId')
-      const s = getStrategyForAccount(account)
-      if (isAutoMode()) {
-        setStrategyStatus(strategyId, 'active')
-        uiBus.broadcast('strategy.updated', { accountId: account, strategyId })
-        audit({ accountId: account, actor: 'auto', action: 'strategy.activate.auto', target: strategyId })
-        return { activated: true, strategyId, note: '自动模式：已直接激活' }
+      if (!s) return null
+      // 与注入系统提示词的文档保持一致：生效版本优先（用户指定历史版本时为其内容）
+      const eff = getEffectiveVersion(account)
+      const versions = listVersions(s.id)
+      return {
+        id: s.id,
+        title: eff?.title ?? s.title,
+        version: eff?.version ?? s.version,
+        markdown: eff?.markdown ?? s.markdown,
+        pinned: eff?.pinned ?? false,
+        activeVersionId: s.activeVersionId,
+        stats: computeAccountStats(account),
+        versions: versions.map((v) => ({ id: v.id, version: v.version, title: v.title, changeLog: v.changeLog, stats: safeParse(v.statsJson), createdAt: v.createdAt }))
       }
-      const result = publishReport({
-        accountId: account,
-        level: 'need_decision',
-        title: `策略上线评审：${s?.name ?? strategyId}`,
-        summary: 'Agent 申请激活策略进入运行。',
-        decisionJson: JSON.stringify({ kind: 'activate', strategyId, options: ['批准', '驳回', '暂缓'] })
-      })
-      audit({ accountId: account, actor: 'agent', action: 'strategy.activate.request', target: strategyId })
-      return { requested: true, strategyId, reportId: result.reportId, note: '已提交上线评审，需人工批准' }
     }
-    case 'deactivate_strategy': {
-      const strategyId = arg('strategyId')
+    case 'get_strategy_versions': {
       const s = getStrategyForAccount(account)
-      if (isAutoMode()) {
-        setStrategyStatus(strategyId, 'deactivated')
-        run("UPDATE run_instance SET status = 'stopped', stopped_at = ? WHERE strategy_id = ? AND status = 'active'", [nowIso(), strategyId])
-        audit({ accountId: account, actor: 'auto', action: 'strategy.deactivate.auto', target: strategyId, detail: { reason: arg('reason') } })
-        return { deactivated: true, strategyId, note: '自动模式：已直接停用' }
-      }
-      const result = publishReport({
-        accountId: account,
-        level: 'need_decision',
-        title: `策略停用评审：${s?.name ?? strategyId}`,
-        summary: `Agent 申请停用策略。原因：${arg('reason') || '未说明'}`,
-        decisionJson: JSON.stringify({ kind: 'correct_retire', strategyId, options: ['批准', '驳回', '暂缓'] })
-      })
-      audit({ accountId: account, actor: 'agent', action: 'strategy.deactivate.request', target: strategyId, detail: { reason: arg('reason') } })
-      return { requested: true, strategyId, reportId: result.reportId, note: '已提交停用评审，需人工确认' }
+      if (!s) return []
+      return listVersions(s.id).map((v) => ({ id: v.id, version: v.version, title: v.title, changeLog: v.changeLog, stats: safeParse(v.statsJson), createdAt: v.createdAt }))
+    }
+    case 'update_strategy': {
+      // 校验必填字段：标题（大模型生成）与一句话变更记录
+      const title = arg('title').trim()
+      const changeLog = arg('changeLog').trim()
+      const markdown = arg('markdown')
+      if (!markdown.trim()) throw new Error('策略文档（markdown）不能为空')
+      if (!title) throw new Error('必须提供简短标题（title）')
+      if (!changeLog) throw new Error('必须提供一句话变更记录（changeLog）')
+      if (title.length > 40) throw new Error('标题过长（≤ 40 字）')
+      if (changeLog.length > 120) throw new Error('变更记录过长（≤ 120 字）')
+      const s = saveStrategyMarkdown({ accountId: account, title, markdown, changeLog, createdBy: 'agent' })
+      uiBus.broadcast('strategy.updated', { accountId: account, strategyId: s.id, version: s.version })
+      return { strategyId: s.id, title: s.title, version: s.version, effective: 'latest' }
     }
 
-    // —— 回测 ——
-    case 'run_backtest': {
-      // 直接触发异步回测任务（回测引擎确定性计算；结果经 backtest.completed 事件推送）。
-      // 动态导入避免 tools ↔ pipeline ↔ sessions 的模块环。
-      const { startBacktestTask } = await import('../../pipeline/backtester')
-      const runId = await startBacktestTask(account, arg('strategyVersionId'), arg('start'), arg('end')).catch((e) => {
-        throw new Error(`发起回测失败: ${(e as Error).message}`)
-      })
-      return { runId, status: 'running' }
-    }
+    // —— 策略评估记录 ——
     case 'get_backtest_result':
       return queryAll(
         'SELECT id, strategy_version_id as strategyVersionId, status, metrics_json as metricsJson, report_json as reportJson, error FROM backtest_run WHERE id = ?',
         [arg('runId')]
       )
-    case 'get_backtest_trades':
-      return queryAll('SELECT * FROM backtest_trade WHERE run_id = ? LIMIT 500', [arg('runId')])
     case 'list_backtests':
       return queryAll(
-        `SELECT br.id, br.strategy_version_id as strategyVersionId, s.name as strategyName, br.status,
+        `SELECT br.id, br.strategy_version_id as strategyVersionId, s.title as strategyTitle, br.status,
            br.metrics_json as metricsJson, br.report_json as reportJson, br.error, br.created_at as createdAt, br.finished_at as finishedAt
          FROM backtest_run br
          JOIN strategy_version sv ON sv.id = br.strategy_version_id
@@ -213,7 +173,7 @@ export async function executeToolCall(accountId: string, toolName: string, args:
       )
     case 'list_run_instances':
       return queryAll(
-        'SELECT ri.id, ri.strategy_id as strategyId, s.name as strategyName, ri.status, ri.started_at as startedAt, ri.stopped_at as stoppedAt FROM run_instance ri LEFT JOIN strategy s ON s.id = ri.strategy_id ORDER BY ri.started_at DESC LIMIT 100'
+        'SELECT ri.id, ri.strategy_id as strategyId, s.title as strategyTitle, ri.status, ri.started_at as startedAt, ri.stopped_at as stoppedAt FROM run_instance ri LEFT JOIN strategy s ON s.id = ri.strategy_id ORDER BY ri.started_at DESC LIMIT 100'
       )
     case 'get_chat_history':
       return listChatMessages(account, { limit: num('limit', 30) }).messages.map((m) => ({ role: m.role, content: m.content, createdAt: m.createdAt }))
@@ -291,6 +251,15 @@ export async function executeToolCall(accountId: string, toolName: string, args:
 
     default:
       throw new Error(`未知工具: ${toolName}`)
+  }
+}
+
+/** JSON 解析兜底（策略版本统计等字段） */
+function safeParse(json: string): unknown {
+  try {
+    return JSON.parse(json)
+  } catch {
+    return {}
   }
 }
 

@@ -7,7 +7,7 @@ import { newId, nowIso, queryAll, run as dbRun } from '../db/connection'
 import { audit } from '../services/audit'
 import { logger } from '../services/logger'
 import { structuredOutput } from '../app/sessions'
-import { PLANNER_PROMPT, SYSTEM_IDENTITY } from '../agent/prompts'
+import { PLANNER_PROMPT } from '../agent/prompts'
 import { getMarketBrief } from '../market/service'
 import { uiBus } from '../app/events'
 import type { PipelineHost } from './index'
@@ -29,7 +29,7 @@ export async function run(accountId: string, period: 'daily' | 'weekly', host?: 
   // 规划的方向必须能转为工作项：缺少宿主时直接失败（失败即失败，不静默降级）
   if (!host) throw new Error('规划管线缺少 PipelineHost（无法入队生成策略工作项）')
   const brief = await getMarketBrief()
-  const strategySummary = queryAll<{ status: string; c: number }>('SELECT status, COUNT(*) AS c FROM strategy WHERE account_id = ? GROUP BY status', [accountId])
+  const strategySummary = queryAll<{ title: string; version: number; updated_at: string }>('SELECT title, version, updated_at FROM strategy WHERE account_id = ?', [accountId])
   const recentSignals = queryAll<{ status: string; c: number }>("SELECT status, COUNT(*) AS c FROM signal WHERE account_id = ? AND created_at >= datetime('now', '-7 days') GROUP BY status", [accountId])
   const lastCorrection = queryAll<{ content_json: string; created_at: string }>(
     "SELECT content_json, created_at FROM review_report WHERE account_id = ? AND json_extract(content_json, '$.hasCorrection') = 1 ORDER BY created_at DESC LIMIT 1",
@@ -47,7 +47,7 @@ export async function run(accountId: string, period: 'daily' | 'weekly', host?: 
     2
   )
   const plan = await structuredOutput(accountId, {
-    system: `${SYSTEM_IDENTITY}\n\n${PLANNER_PROMPT}`,
+    system: PLANNER_PROMPT,
     prompt,
     schema: planSchema,
     purpose: `plan:${period}`

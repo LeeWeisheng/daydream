@@ -1,236 +1,86 @@
 /**
- * 自动运行（runner）：运行中的策略按调度产出交易建议（信号）。
+ * 自动运行（runner）：收盘后由 Agent 基于策略文档（系统提示词主体）产出交易建议（信号）。
  * 调度默认每交易日 15:05（收盘后），用收盘实时快照（当日收盘价）；
- * 信号产出前必经风控引擎校验；信号仅推送，人工执行后反馈闭环。
+ * 信号经 Agent 调用 publish_signal 产出，必经风控引擎校验；信号仅推送，人工执行后反馈闭环。
+ * 运行结束后刷新生效版本的统计（本金/盈亏/盈亏比/胜率）。
  */
-import type { Strategy } from '@shared/types'
 import { newId, nowIso, queryAll, run } from '../db/connection'
 import { audit } from '../services/audit'
 import { logger } from '../services/logger'
-import { parseAndValidateDsl } from '@shared/strategy/schema'
-import { evalCondition, type PositionCtx } from '../quant/backtest/engine'
-import { sma, crossDetect, macd, momentum, volumeRatio, rsi, boll, obv } from '../quant/backtest/indicators'
-import { runRiskCheck, enabledRulesFromRows, type EnabledRule } from '../quant/risk'
-import { getQuotes } from '../market/service'
-import { checkRiskForSignal, persistSignal, persistRiskResult } from '../signals/service'
-import { uiBus } from '../app/events'
-import { activateStrategy as activateStrategyService } from '../strategy/service'
-import { LOT_SIZE } from '@shared/constants'
+import { runAgentTurn } from '../app/sessions'
+import { RUNNER_PROMPT } from '../agent/prompts'
+import { getMarketBrief } from '../market/service'
+import { getStrategyForAccount, getEffectiveVersion, refreshVersionStats } from '../strategy/service'
+import { checkRiskForSignal } from '../signals/service'
+import { shanghaiDateStr } from '@shared/constants'
 
-/** 运行决策：对活跃账户的运行中策略跑一遍信号评估（每账户唯一策略） */
+/** 运行决策：对活跃账户的生效策略跑一遍 Agent 信号评估（每账户唯一策略） */
 export async function runDailyDecision(accountId: string): Promise<{ signals: number }> {
-  const strategies = queryAll<Strategy & Record<string, unknown>>("SELECT * FROM strategy WHERE account_id = ? AND status IN ('active', 'paused')", [accountId])
-  let total = 0
-  for (const strategy of strategies) {
-    try {
-      total += await evaluateStrategy(accountId, strategy)
-    } catch (e) {
-      logger.warn(`[runner] strategy ${strategy.id} evaluate failed: ${(e as Error).message}`)
-    }
+  const strategy = getStrategyForAccount(accountId)
+  if (!strategy) {
+    logger.info(`[runner] account ${accountId} has no strategy, skipped`)
+    return { signals: 0 }
   }
-  logger.info(`[runner] daily decision done: ${total} signals`)
-  return { signals: total }
+  const before = countSignalsToday(accountId)
+  try {
+    await evaluateStrategy(accountId, strategy.id)
+  } catch (e) {
+    logger.warn(`[runner] strategy ${strategy.id} decision failed: ${(e as Error).message}`)
+  }
+  // 刷新生效版本统计（成交记录可能有更新）
+  const eff = getEffectiveVersion(accountId)
+  if (eff) refreshVersionStats(strategy.id, eff.versionId)
+  const after = countSignalsToday(accountId)
+  const emitted = Math.max(after - before, 0)
+  logger.info(`[runner] daily decision done: ${emitted} signals`)
+  return { signals: emitted }
 }
 
-async function evaluateStrategy(accountId: string, strategy: Strategy & Record<string, unknown>): Promise<number> {
-  const dslJson = String(strategy.dsl_json ?? '')
-  // 无可执行 DSL（策略文档未含/已移除 ```dsl 块）→ 跳过确定性评估，仅文档态
-  if (!dslJson.trim()) {
-    logger.info(`[runner] strategy ${strategy.id} has no executable DSL block, skipped`)
-    return 0
-  }
-  const { dsl } = parseAndValidateDsl(dslJson)
-  if (!dsl) throw new Error('策略 DSL 非法')
-  // 运行实例（无则创建）
-  let instance = queryAll<{ id: string; strategy_version_id: string }>(
-    'SELECT id, strategy_version_id FROM run_instance WHERE strategy_id = ? AND status = ?',
-    [strategy.id, 'active']
-  )[0]
+/** 由 Agent 基于策略文档决策并产出信号（策略文档经 sessions 注入系统提示词） */
+async function evaluateStrategy(accountId: string, strategyId: string): Promise<void> {
+  // 运行实例（无则创建；记录运行事实，供信号关联）
+  let instance = queryAll<{ id: string }>('SELECT id FROM run_instance WHERE strategy_id = ? AND status = ?', [strategyId, 'active'])[0]
   if (!instance) {
-    const versionId = queryAll<{ id: string }>('SELECT id FROM strategy_version WHERE strategy_id = ? ORDER BY version DESC LIMIT 1', [strategy.id])[0]?.id
     const id = newId()
-    run('INSERT INTO run_instance (id, strategy_id, strategy_version_id, status, started_at) VALUES (?, ?, ?, ?, ?)', [id, strategy.id, versionId ?? '', 'active', nowIso()])
-    instance = { id, strategy_version_id: versionId ?? '' }
+    const versionId = queryAll<{ id: string }>('SELECT id FROM strategy_version WHERE strategy_id = ? ORDER BY version DESC LIMIT 1', [strategyId])[0]?.id ?? ''
+    run('INSERT INTO run_instance (id, strategy_id, strategy_version_id, status, started_at) VALUES (?, ?, ?, ?, ?)', [id, strategyId, versionId, 'active', nowIso()])
+    instance = { id }
   }
 
-  // 候选池 = 满足 universe 过滤 + entry 条件的股票（用本地日线评估）
-  const candidates = evaluateCandidates(dsl)
-  // 持仓（人工维护）
+  // 市场简报与账户概览作为决策输入（Agent 可继续用工具深入）
+  const brief = await getMarketBrief()
   const positions = queryAll<{ code: string; qty: number; cost_price: number }>('SELECT code, qty, cost_price FROM position WHERE account_id = ?', [accountId])
-  const rules = enabledRulesFromRows(queryAll<{ rule_key: string; params_json: string; enabled: number }>('SELECT rule_key, params_json, enabled FROM risk_rule WHERE account_id = ?', [accountId]))
-  const signalsToday = (queryAll<{ c: number }>("SELECT COUNT(*) AS c FROM signal WHERE account_id = ? AND created_at >= datetime('now', 'start of day')", [accountId])[0] ?? { c: 0 }).c
+  const prompt = [
+    `今天是 ${shanghaiDateStr()}（交易日），请执行收盘后的运行决策。`,
+    '',
+    `当前运行实例 runId: ${instance.id}`,
+    `当前策略 strategyId: ${strategyId}`,
+    '',
+    '账户持仓（code, qty, cost_price）：',
+    positions.length ? positions.map((p) => `- ${p.code} 数量 ${p.qty} 成本 ${p.cost_price}`).join('\n') : '- （空仓）',
+    '',
+    '市场简报：',
+    JSON.stringify(brief, null, 2),
+    '',
+    '请严格按系统提示词中的策略文档决策；只产出有明确依据的信号。'
+  ].join('\n')
 
-  // 市场状态（熔断规则）
-  const indexRow = queryAll<{ close: number }>("SELECT close FROM index_daily WHERE index_code = '000300' ORDER BY date DESC LIMIT 2", [])
-  const indexPctChg = indexRow.length >= 2 ? indexRow[0].close / indexRow[1].close - 1 : 0
-
-  let emitted = 0
-  // 卖出信号：持仓中满足 exit 条件的标的
-  for (const pos of positions) {
-    const exitHit = evaluateExit(dsl, pos)
-    if (!exitHit) continue
-    const quote = (await getQuotes([pos.code], true))[0]
-    const refPrice = quote?.price ?? 0
-    if (refPrice <= 0) continue
-    const risk = runRiskCheck(
-      {
-        accountId,
-        totalAssets: 0,
-        cash: 0,
-        positions: positions.map((p) => ({ accountId, code: p.code, qty: p.qty, costPrice: p.cost_price, updatedAt: '' })),
-        signalsToday: signalsToday + emitted,
-        signal: { code: pos.code, name: quote?.name ?? pos.code, side: 'sell', qty: pos.qty, refPrice, latestPrice: quote?.price },
-        market: { indexPctChg, prevCloseOfStock: quote?.prevClose }
-      },
-      rules
-    )
-    persistRiskResult(accountId, 'signal', pos.code, risk)
-    if (!risk.passed) continue
-    persistSignal(
-      accountId,
-      {
-        runId: instance.id,
-        strategyId: strategy.id,
-        code: pos.code,
-        side: 'sell',
-        qty: pos.qty,
-        refPrice,
-        basis: `exit_condition: ${strategy.name}`
-      },
-      risk
-    )
-    emitted += 1
-  }
-
-  // 买入信号：候选池（持仓外）满足 entry 条件
-  const heldCodes = new Set(positions.map((p) => p.code))
-  const maxPositions = dsl.portfolio.max_positions
-  const freeSlots = Math.max(maxPositions - positions.length, 0)
-  const buyCodes = candidates.filter((c) => !heldCodes.has(c.code)).slice(0, Math.min(freeSlots, 5))
-  const quotes = await getQuotes(buyCodes.map((c) => c.code), true)
-  for (const candidate of buyCodes) {
-    const quote = quotes.find((q) => q.code === candidate.code)
-    if (!quote || quote.price <= 0) continue
-    const refPrice = quote.price
-    // 数量：以账户资产均分估算（无资产快照时默认 10 万元账户）
-    const snap = queryAll<{ total_assets: number }>('SELECT total_assets FROM account_snapshot WHERE account_id = ? ORDER BY date DESC LIMIT 1', [accountId])[0]
-    const totalAssets = snap?.total_assets ?? 100_000
-    const budget = totalAssets * Math.min(dsl.portfolio.max_position_pct, 0.2)
-    const qty = Math.max(Math.floor(budget / (refPrice * 1.001) / LOT_SIZE) * LOT_SIZE, LOT_SIZE)
-    const risk = runRiskCheck(
-      {
-        accountId,
-        totalAssets,
-        cash: 0,
-        positions: positions.map((p) => ({ accountId, code: p.code, qty: p.qty, costPrice: p.cost_price, updatedAt: '' })),
-        signalsToday: signalsToday + emitted,
-        signal: { code: candidate.code, name: quote.name, side: 'buy', qty, refPrice, latestPrice: quote.price },
-        market: { indexPctChg, prevCloseOfStock: quote.prevClose }
-      },
-      rules
-    )
-    persistRiskResult(accountId, 'signal', candidate.code, risk)
-    if (!risk.passed) continue
-    persistSignal(
-      accountId,
-      {
-        runId: instance.id,
-        strategyId: strategy.id,
-        code: candidate.code,
-        side: 'buy',
-        qty,
-        refPrice,
-        basis: `entry_condition: ${strategy.name} (${candidate.reason})`
-      },
-      risk
-    )
-    emitted += 1
-  }
-  return emitted
+  const reply = await runAgentTurn(accountId, {
+    system: RUNNER_PROMPT,
+    prompt,
+    purpose: 'daily_decision',
+    maxSteps: 12,
+    useProModel: true
+  })
+  audit({ accountId, actor: 'agent', action: 'runner.decided', target: strategyId, detail: { reply: reply.slice(0, 500) } })
 }
 
-/** 候选池评估：universe 过滤 + entry 条件（基于本地日线，纯确定性） */
-function evaluateCandidates(dsl: NonNullable<ReturnType<typeof parseAndValidateDsl>['dsl']>): { code: string; reason: string }[] {
-  const end = new Date().toISOString().slice(0, 10)
-  const start = new Date(Date.now() - 400 * 86400000).toISOString().slice(0, 10)
-  const rows = queryAll<{ code: string; name: string }>('SELECT code, name FROM stock_basic WHERE status = ?', ['listed'])
-  const out: { code: string; reason: string }[] = []
-  for (const stock of rows) {
-    if (out.length >= 20) break
-    // universe 过滤
-    if (stock.name.includes('ST') && dsl.universe.filters.some((f) => f.op === 'exclude_st')) continue
-    const bars = queryAll<{ date: string; open: number; high: number; low: number; close: number; volume: number; amount: number }>(
-      'SELECT date, open, high, low, close, volume, amount FROM kline_daily WHERE code = ? AND date >= ? ORDER BY date',
-      [stock.code, start]
-    )
-    if (bars.length < 40) continue
-    let excluded = false
-    for (const f of dsl.universe.filters) {
-      if (f.op === 'liquidity_min') {
-        const amount = typeof f.params.amount === 'number' ? f.params.amount : 1e8
-        const days = typeof f.params.days === 'number' ? f.params.days : 20
-        const recent = bars.slice(-days)
-        const avg = recent.reduce((a, b) => a + b.amount, 0) / days
-        if (avg < amount) {
-          excluded = true
-          break
-        }
-      }
-    }
-    if (excluded) continue
-    const closes = bars.map((b) => b.close)
-    const ctx = { closes, highs: bars.map((b) => b.high), lows: bars.map((b) => b.low), volumes: bars.map((b) => b.volume), date: end }
-    const hit = evalConditionGroup(dsl.entry.conditions, dsl.entry.logic, ctx)
-    if (hit) out.push({ code: stock.code, reason: 'entry conditions hit' })
-  }
-  return out
-}
-
-/** 持仓退出信号评估（含持仓上下文：止损/止盈/持有天数） */
-function evaluateExit(dsl: NonNullable<ReturnType<typeof parseAndValidateDsl>['dsl']>, pos: { code: string; qty: number; cost_price: number }): boolean {
-  const end = new Date().toISOString().slice(0, 10)
-  const start = new Date(Date.now() - 400 * 86400000).toISOString().slice(0, 10)
-  const bars = queryAll<{ date: string; open: number; high: number; low: number; close: number; volume: number }>(
-    'SELECT date, open, high, low, close, volume FROM kline_daily WHERE code = ? AND date >= ? ORDER BY date',
-    [pos.code, start]
-  )
-  if (bars.length < 20) return false
-  const positionCtx: PositionCtx = { buyDate: bars[Math.max(bars.length - 2, 0)].date, costPrice: pos.cost_price, qty: pos.qty }
-  const ctx = {
-    closes: bars.map((b) => b.close),
-    highs: bars.map((b) => b.high),
-    lows: bars.map((b) => b.low),
-    volumes: bars.map((b) => b.volume),
-    date: end,
-    position: positionCtx
-  }
-  const results = dsl.exit.conditions.map((c) => evalCondition(c, ctx))
-  return dsl.exit.logic === 'and' ? results.every(Boolean) : results.some(Boolean)
-}
-
-function evalConditionGroup(
-  conditions: { indicator: string; params: Record<string, unknown> }[],
-  logic: 'and' | 'or',
-  ctx: { closes: number[]; highs: number[]; lows: number[]; volumes: number[]; date: string }
-): boolean {
-  const results = conditions.map((c) => evalCondition(c as never, ctx as never))
-  return logic === 'and' ? results.every(Boolean) : results.some(Boolean)
-}
-
-/** 激活策略（activate 工作项/人工批准后）：pending_approval → active */
-export async function activateStrategy(accountId: string, context: Record<string, unknown>): Promise<Record<string, unknown>> {
-  const strategyId = String(context.strategyId ?? '')
-  const strategy = queryAll<{ id: string }>('SELECT id FROM strategy WHERE id = ?', [strategyId])[0]
-  if (!strategy) throw new Error('策略不存在')
-  activateStrategyService(accountId, strategyId, 'user')
-  audit({ accountId, actor: 'user', action: 'strategy.activated', target: strategyId })
-  uiBus.broadcast('strategy.updated', { accountId, strategyId })
-  return { strategyId, status: 'active' }
+function countSignalsToday(accountId: string): number {
+  // 按上海时区当日零点起算（信号 created_at 为 UTC ISO 串）
+  const shDate = shanghaiDateStr()
+  const startUtc = new Date(`${shDate}T00:00:00+08:00`).toISOString()
+  return queryAll<{ c: number }>('SELECT COUNT(*) AS c FROM signal WHERE account_id = ? AND created_at >= ?', [accountId, startUtc])[0]?.c ?? 0
 }
 
 /** 风控复检（供工具与管线复用） */
 export { checkRiskForSignal }
-
-// 导出供测试与工具使用的评估辅助
-export const indicatorUtils = { sma, crossDetect, macd, momentum, volumeRatio, rsi, boll, obv }
-export type { EnabledRule }

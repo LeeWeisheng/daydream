@@ -27,7 +27,6 @@ export type WorkItemType =
   | 'plan'
   | 'generate_strategy'
   | 'backtest'
-  | 'activate'
   | 'monitor_review'
   | 'review_daily'
   | 'review_weekly'

@@ -8,7 +8,7 @@ import { newId, nowIso, queryAll, run as dbRun } from '../db/connection'
 import { audit } from '../services/audit'
 import { logger } from '../services/logger'
 import { structuredOutput } from '../app/sessions'
-import { REVIEWER_PROMPT, SYSTEM_IDENTITY } from '../agent/prompts'
+import { REVIEWER_PROMPT } from '../agent/prompts'
 import { publishReport } from '../reports/service'
 import { computeSignalDeviation, computeTradeStats } from '../quant/perf'
 import type { TradeRecord } from '@shared/types'
@@ -36,7 +36,7 @@ const reviewSchema = z.object({
     z.object({
       strategyId: z.string().optional(),
       suggestion: z.string(),
-      action: z.enum(['tweak', 'restructure', 'pause', 'retire']),
+      action: z.enum(['update', 'suggest']),
       evidence: z.string()
     })
   ),
@@ -51,7 +51,7 @@ export async function run(accountId: string, period: 'daily' | 'weekly', host?: 
      FROM trade_record WHERE account_id = ? AND traded_at >= ${since}`,
     [accountId]
   )
-  const strategies = queryAll<{ id: string; name: string; status: string }>('SELECT id, name, status FROM strategy WHERE account_id = ?', [accountId])
+  const strategies = queryAll<{ id: string; title: string; version: number }>('SELECT id, title, version FROM strategy WHERE account_id = ?', [accountId])
   const deviation = computeSignalDeviation(signals)
   const tradeStats = computeTradeStats(trades as TradeRecord[])
   // 基准（沪深300）区间涨跌
@@ -71,7 +71,7 @@ export async function run(accountId: string, period: 'daily' | 'weekly', host?: 
     2
   )
   const report = await structuredOutput(accountId, {
-    system: `${SYSTEM_IDENTITY}\n\n${REVIEWER_PROMPT}`,
+    system: REVIEWER_PROMPT,
     prompt,
     schema: reviewSchema,
     purpose: `review:${period}`,
@@ -96,7 +96,7 @@ export async function run(accountId: string, period: 'daily' | 'weekly', host?: 
       host?.enqueueTicket({
         accountId,
         type: 'correct',
-        priority: correction.action === 'retire' || correction.action === 'pause' ? 'high' : 'medium',
+        priority: 'medium',
         context: {
           strategyId: correction.strategyId,
           suggestion: correction.suggestion,

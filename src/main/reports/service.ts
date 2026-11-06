@@ -3,17 +3,15 @@
  * 规则（docs《Agent 决策闭环设计》§6）：
  * - 分级：silent（仅审计）/ summary（对话流静默）/ result（可用结果）/ need_decision（待人工决策）；
  * - 全部 summary 及以上汇报同步进入首页对话流（经 Outbox）；
- * - need_decision 决策响应（批准/驳回/暂缓）执行对应动作：
- *   activate（激活）、correct_pause（暂停）、correct_retire（淘汰）、alert（预警确认）；
- * - 自动模式（accept mode = auto）：need_decision 自动批准并执行（策略验证场景，
- *   真实交易边界不变），全程审计留痕。
+ * - need_decision 决策响应（批准/驳回/暂缓）执行对应动作：alert（预警确认）；
+ *   （策略无审核流：保存即生效，不再有 activate/pause/retire 决策动作）
+ * - 自动模式（accept mode = auto）：need_decision 自动批准并执行，全程审计留痕。
  */
 import type { Report, ReportLevel } from '@shared/types'
 import { inTransaction, newId, nowIso, queryAll, queryOne, run } from '../db/connection'
 import { audit } from '../services/audit'
 import { assertUser } from '../core/errors'
 import { isAutoMode } from '../settings/service'
-import { activateStrategy, deactivateStrategy, pauseStrategy } from '../strategy/service'
 import { acknowledgeAlert } from '../alerts/service'
 import { addChatMessage, formatReportContent, syncReportStatus } from '../chat/service'
 import { uiBus } from '../app/events'
@@ -93,16 +91,8 @@ export function applyReportDecision(input: ReportDecisionInput): void {
 
   if (decision !== 'approved' || !decisionJson) return
   try {
-    const d = JSON.parse(decisionJson) as { kind?: string; strategyId?: string; alertId?: string }
-    if (d.kind === 'activate' && d.strategyId) {
-      activateStrategy(accountId, d.strategyId, actor === 'auto' ? 'auto' : 'user')
-      audit({ accountId, actor, action: 'strategy.activated', target: d.strategyId, detail: { via: reportId, auto: actor === 'auto' } })
-    } else if (d.kind === 'correct_pause' && d.strategyId) {
-      pauseStrategy(accountId, d.strategyId, actor === 'auto' ? 'auto' : 'user')
-      audit({ accountId, actor, action: 'correction.paused', target: d.strategyId, detail: { via: reportId, auto: actor === 'auto' } })
-    } else if (d.kind === 'correct_retire' && d.strategyId) {
-      deactivateStrategy(accountId, d.strategyId, `纠正淘汰（${actor === 'auto' ? '自动模式' : '人工批准'}）`, actor === 'auto' ? 'auto' : 'user')
-    } else if (d.kind === 'alert' && d.alertId) {
+    const d = JSON.parse(decisionJson) as { kind?: string; alertId?: string }
+    if (d.kind === 'alert' && d.alertId) {
       acknowledgeAlert(String(d.alertId))
     }
   } catch (e) {

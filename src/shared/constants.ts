@@ -203,7 +203,7 @@ export const MODEL_PRESETS = [
   }
 ] as const
 
-// ---------- 默认用户偏好（账户创建时播种） ----------
+// ---------- 默认用户偏好（账户创建时写入默认策略文档的「用户偏好」段落） ----------
 export const DEFAULT_PREFERENCES = {
   riskTolerance: 'moderate',
   investmentStyle: 'trend',
@@ -220,13 +220,91 @@ export const DEFAULT_PREFERENCES = {
   notify: { signals: true, alerts: true, summaries: true, quietHours: '22:00-08:00' }
 } as const
 
-/** 默认策略 DSL 模板（账户创建时播种，draft 状态待填写/由 Agent 生成） */
-export function emptyDslTemplate(name: string): Record<string, unknown> {
-  return {
-    meta: { name, description: '待完善', rationale: '', complexity: 1 },
-    universe: { source: 'all_a', filters: [] },
-    entry: { logic: 'and', conditions: [] },
-    exit: { logic: 'or', conditions: [] },
-    portfolio: { max_positions: 5, position_size: 'equal_weight', max_position_pct: 0.2, rebalance: 'daily' }
-  }
+/** 默认用户偏好 → Markdown 段落（策略文档的组成部分） */
+export function defaultPreferencesMarkdown(): string {
+  const labels = {
+    conservative: '保守',
+    moderate: '稳健',
+    aggressive: '激进',
+    value: '价值投资',
+    growth: '成长投资',
+    trend: '趋势跟踪',
+    blend: '均衡配置',
+    short: '短线',
+    swing: '波段',
+    long: '中长线',
+    low: '低频',
+    medium: '中频',
+    high: '高频'
+  } as const
+  const p = DEFAULT_PREFERENCES
+  return [
+    `- 风险偏好：${labels[p.riskTolerance]}`,
+    `- 投资风格：${labels[p.investmentStyle]}`,
+    `- 期望年化收益：${Math.round(p.expectedAnnualReturn * 100)}%`,
+    `- 最大可承受回撤：${Math.round(p.maxDrawdownTolerance * 100)}%`,
+    `- 持股周期：${labels[p.holdingPeriod]}`,
+    `- 偏好行业：${p.preferredIndustries.length ? p.preferredIndustries.join('、') : '（不限）'}`,
+    `- 排除行业：${p.excludedIndustries.length ? p.excludedIndustries.join('、') : '（无）'}`,
+    `- 最大持仓数：${p.maxPositions}`,
+    `- 单票仓位上限：${Math.round(p.maxPositionPct * 100)}%`,
+    `- 总仓位上限：${Math.round(p.maxTotalPositionPct * 100)}%`,
+    `- 交易频率：${labels[p.tradeFrequency]}`
+  ].join('\n')
+}
+
+/**
+ * 默认策略文档模板（账户创建时播种，纯 Markdown 文本，无任何 DSL）。
+ * 文档 = 交易策略 + 用户偏好 + 风控纪律 + 信号标准，是注入 Agent 的系统提示词主体。
+ */
+export function buildDefaultStrategyMarkdown(accountName: string): string {
+  return [
+    `# ${accountName} 的投资策略`,
+    '',
+    '> 本文档是 Agent 的核心工作依据：既包含交易策略，也包含用户偏好、风控纪律与信号标准。',
+    '> 由 Agent 或用户在需要时迭代更新（每次更新产生新版本）。',
+    '',
+    '## 策略概述',
+    '',
+    '（待补充：一句话概括策略思路，如「基于均线趋势跟随，控制回撤，波段操作」。）',
+    '',
+    '## 市场判断框架',
+    '',
+    '- 指数环境：关注沪深 300 与全市场涨跌家数，单边急跌时降仓或空仓。',
+    '- 风格与板块：结合政策与资金流向选择方向，不追高、不抄底。',
+    '',
+    '## 选股域',
+    '',
+    '- 排除 ST/*ST 与长期停牌标的。',
+    '- 优先流动性充足的标的（近 20 日均成交额充足）。',
+    '',
+    '## 入场条件',
+    '',
+    '- （待补充：明确可量化的入场信号，如均线金叉、放量突破、回踩支撑等。）',
+    '',
+    '## 出场条件',
+    '',
+    '- （待补充：止盈、止损、持有期限与卖出信号。）',
+    '',
+    '## 组合约束',
+    '',
+    '- 最大持仓数：5',
+    '- 单票仓位上限：20%',
+    '- 总仓位上限：80%',
+    '',
+    '## 用户偏好',
+    '',
+    defaultPreferencesMarkdown(),
+    '',
+    '## 风控与执行纪律',
+    '',
+    '- 所有交易建议必须通过风控检查（涨跌停、仓位上限、单日信号数等）。',
+    '- 单票止损与止盈目标在信号说明（basis）中写明。',
+    '- 不确定时宁可不出信号；一切结论基于真实行情数据。',
+    '',
+    '## 信号标准',
+    '',
+    '- 仅在满足入场/出场条件、且风控通过时产出交易建议（信号）。',
+    '- 每个信号附带触发依据（basis）与参考价格。'
+  ].join('\n')
 }

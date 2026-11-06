@@ -20,7 +20,7 @@ import { fmtDateTime, fmtTime } from '../lib/format'
 const RHYTHM = [
   { time: SCHEDULE.planTime, title: '盘前规划（周五为深度规划）', content: '评估市场与历史表现，制定/调整当日行动计划', kind: 'agent' },
   { time: '盘中（每 2~5 分钟）', title: '盘中盯盘', content: '监控持仓/候选池：涨跌停接近、量能异动、止损止盈线触及', kind: 'agent' },
-  { time: SCHEDULE.runnerTime, title: '收盘运行决策', content: '运行中策略按收盘快照评估入场/出场条件，产出次日交易建议（信号）', kind: 'agent' },
+  { time: SCHEDULE.runnerTime, title: '收盘运行决策', content: 'Agent 基于策略文档（系统提示词）按收盘快照产出交易建议（信号）', kind: 'agent' },
   { time: SCHEDULE.dataUpdateTime, title: '数据增量更新', content: '拉取当日全市场日线并入库（不受运行开关限制）', kind: 'data' },
   { time: SCHEDULE.reviewDailyTime, title: '日复盘（周五 17:30 周复盘）', content: '回顾信号执行与策略表现，归因分析，必要时产出纠正工作项', kind: 'agent' }
 ]

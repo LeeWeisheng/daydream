@@ -2,16 +2,16 @@
  * 账户服务（Accounts）：账户行的唯一写者（dsh「one writer per state」）。
  * 规则（docs《系统规则与账户模型》§1）：
  * - 本地账户，无登录；首次使用必须先创建账户（不自动创建默认账户）；
- * - 创建副作用：播种默认风控规则 + 唯一默认策略（draft）；
+ * - 创建副作用：播种默认风控规则 + 唯一默认策略（纯 Markdown 文档）；
  * - 无账户时交易节律调度不运行。
  */
 import type { Account } from '@shared/types'
-import { DEFAULT_INITIAL_CASH, DEFAULT_PREFERENCES, emptyDslTemplate } from '@shared/constants'
-import { markdownFromDsl, type StrategyDSL } from '@shared/strategy/schema'
+import { DEFAULT_INITIAL_CASH, buildDefaultStrategyMarkdown } from '@shared/constants'
 import { newId, nowIso, queryAll, queryOne, run, inTransaction } from '../db/connection'
 import { audit } from '../services/audit'
 import { UserError } from '../core/errors'
 import { DEFAULT_RISK_RULES } from '../quant/risk'
+import { computeAccountStats } from '../strategy/service'
 
 /** 活跃账户（Agent/调度器运行的资金视角；header 账户下拉切换时更新） */
 let activeAccountId = ''
@@ -156,26 +156,38 @@ function seedRiskRules(accountId: string): void {
   }
 }
 
-/** 确保账户存在唯一策略（无则创建默认 draft：默认偏好 + Markdown 模板） */
+/** 确保账户存在唯一策略（无则创建默认策略：纯 Markdown 文档，含交易策略框架与用户偏好段落） */
 function ensureStrategyForAccount(accountId: string, accountName: string): void {
-  const existing = queryOne<{ id: string }>('SELECT id FROM strategy WHERE account_id = ?', [accountId])
-  if (existing) return
+  const existing = queryOne<{ id: string; markdown: string }>('SELECT id, markdown FROM strategy WHERE account_id = ?', [accountId])
+  if (existing) {
+    // 旧库迁移兜底：策略存在但文档为空（v4 之前创建且从未保存）时回填默认文档与最新版本行
+    if (!String(existing.markdown ?? '').trim()) {
+      const markdown = buildDefaultStrategyMarkdown(accountName)
+      const now = nowIso()
+      run('UPDATE strategy SET markdown = ?, updated_at = ? WHERE id = ?', [markdown, now, existing.id])
+      run('UPDATE strategy_version SET markdown = ? WHERE id = (SELECT id FROM strategy_version WHERE strategy_id = ? ORDER BY version DESC LIMIT 1)', [
+        markdown,
+        existing.id
+      ])
+    }
+    return
+  }
   const now = nowIso()
   const strategyId = newId()
-  const dsl = emptyDslTemplate(`${accountName} 的策略`)
-  const dslJson = JSON.stringify(dsl)
-  const markdown = markdownFromDsl(`${accountName} 的策略`, dsl as unknown as StrategyDSL)
-  const prefs = JSON.stringify(DEFAULT_PREFERENCES)
+  const title = `${accountName} 的策略`
+  const markdown = buildDefaultStrategyMarkdown(accountName)
   run(
-    "INSERT INTO strategy (id, account_id, name, version, dsl_json, markdown, preferences_json, status, created_by, rationale, created_at, updated_at) VALUES (?, ?, ?, 1, ?, ?, ?, 'draft', 'system', '', ?, ?)",
-    [strategyId, accountId, `${accountName} 的策略`, dslJson, markdown, prefs, now, now]
+    "INSERT INTO strategy (id, account_id, title, version, markdown, active_version_id, created_by, created_at, updated_at) VALUES (?, ?, ?, 1, ?, NULL, 'system', ?, ?)",
+    [strategyId, accountId, title, markdown, now, now]
   )
-  run('INSERT INTO strategy_version (id, strategy_id, version, dsl_json, markdown, change_log, created_at) VALUES (?, ?, 1, ?, ?, ?, ?)', [
+  run('INSERT INTO strategy_version (id, strategy_id, version, title, markdown, change_log, stats_json, created_at) VALUES (?, ?, 1, ?, ?, ?, ?, ?)', [
     newId(),
     strategyId,
-    dslJson,
+    title,
     markdown,
     '初始版本（系统播种）',
+    // 真实统计快照（本金/盈亏/盈亏比/胜率），与保存新版本的口径一致
+    JSON.stringify(computeAccountStats(accountId)),
     now
   ])
 }

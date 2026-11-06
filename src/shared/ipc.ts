@@ -16,7 +16,7 @@ import type {
   Signal,
   StockBasic,
   Strategy,
-  StrategyPreferences,
+  StrategyStats,
   StrategyVersion,
   ThemeMode,
   TradeRecord,
@@ -60,14 +60,11 @@ export const IPC = {
   dataDeleteStock: 'data:deleteStock',
   dataUpsertKline: 'data:upsertKline',
   dataDeleteKline: 'data:deleteKline',
-  // 策略（每账户唯一一份：交易策略 DSL + 用户偏好）
+  // 策略（每账户唯一一份：Markdown 纯文本 = 交易策略 + 用户偏好，注入 Agent 系统提示词）
   strategyGetForAccount: 'strategy:getForAccount',
   strategySave: 'strategy:save',
   strategyGetVersions: 'strategy:getVersions',
-  strategyRollback: 'strategy:rollback',
-  strategyActivate: 'strategy:activate',
-  strategyDeactivate: 'strategy:deactivate',
-  strategyGetLatestBacktest: 'strategy:getLatestBacktest',
+  strategySetActiveVersion: 'strategy:setActiveVersion',
   // 交易（人工录入，联动资金与持仓）
   tradeOrder: 'trade:order',
   tradeList: 'trade:list',
@@ -123,12 +120,11 @@ export interface SettingsPatch {
 
 export interface StrategySaveReq {
   accountId: string
-  /** 策略名称 */
-  name?: string
-  /** 策略文档（Markdown；用户与 Agent 均可改，新版本留档；```dsl 块自动同步 dsl_json） */
-  markdown?: string
-  /** 用户偏好（仅用户可改；主进程校验 actor=user） */
-  preferencesJson?: string
+  /** 完整策略文档（Markdown 纯文本：交易策略 + 用户偏好等全部信息；新版本立即生效） */
+  markdown: string
+  /** 简短标题（Agent 更新时由大模型生成；用户编辑可选，缺省保留现有标题） */
+  title?: string
+  /** 一句话变更记录（Agent 更新必填） */
   changeLog?: string
   actor: 'user' | 'agent'
 }
@@ -252,10 +248,8 @@ export interface DaydreamApi {
     getForAccount(accountId: string): Promise<Strategy | null>
     save(req: StrategySaveReq): Promise<Strategy>
     getVersions(strategyId: string): Promise<StrategyVersion[]>
-    rollback(strategyId: string, versionId: string): Promise<Strategy>
-    activate(accountId: string): Promise<void>
-    deactivate(accountId: string): Promise<void>
-    getLatestBacktest(accountId: string): Promise<Record<string, unknown> | null>
+    /** 设置生效版本：versionId 为 null 表示恢复默认（使用最新版本） */
+    setActiveVersion(accountId: string, versionId: string | null): Promise<Strategy>
   }
   trades: {
     order(req: TradeOrderReq): Promise<void>
@@ -298,4 +292,4 @@ export interface DaydreamApi {
   onEvent(cb: (ev: UiEvent) => void): () => void
 }
 
-export type { StrategyPreferences }
+export type { StrategyStats }

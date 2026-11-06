@@ -10,7 +10,7 @@ import { useAppStore } from '../stores'
 
 const FEATURES = [
   { icon: <DatabaseOutlined />, title: '行情数据', desc: '全市场日线增量入库' },
-  { icon: <ExperimentOutlined />, title: '策略回测', desc: '确定性 DSL 引擎回测' },
+  { icon: <ExperimentOutlined />, title: '策略管理', desc: 'Markdown 策略文档注入 Agent' },
   { icon: <RobotOutlined />, title: 'AI 决策闭环', desc: '盘前规划 → 复盘纠正' }
 ]
 

@@ -22,18 +22,21 @@ export const TOOL_SCHEMAS: ToolSchemaDef[] = [
   { name: 'get_data_stats', description: '本地数据统计：股票数、K 线行数、数据日期范围', zodShape: {} },
   { name: 'trigger_data_update', description: '触发当日数据增量更新（异步任务，已在运行则忽略；检测到数据缺失时可主动调用）', zodShape: {} },
   { name: 'web_search', description: '联网搜索最新信息（行情动态、政策新闻、公司公告、市场资讯），返回中文总结与来源链接。需要最新/实时信息时使用。', zodShape: { query: z.string().describe('搜索关键词或问题') } },
-  // —— 策略管理（每账户唯一一份：Markdown 策略文档 + 用户偏好；偏好只读，仅用户可改） ——
-  { name: 'create_strategy', description: '首次为账户生成策略文档（Markdown，必须内嵌一个 ```dsl 代码块作为可执行部分；账户已有策略时改用 update_strategy）', zodShape: { name: z.string(), markdown: z.string().describe('策略 Markdown 文档（含 ```dsl JSON 代码块）'), rationale: z.string().default('') } },
-  { name: 'update_strategy', description: '迭代账户唯一策略的 Markdown 文档（新版本留档；不得修改用户偏好；```dsl 块同步执行层，无块则为纯文档态）', zodShape: { name: z.string().optional(), markdown: z.string(), rationale: z.string().default('') } },
-  { name: 'list_strategies', description: '获取当前账户的唯一策略（含用户偏好，只读）', zodShape: {} },
-  { name: 'get_strategy', description: '获取当前账户唯一策略详情（Markdown 文档 + DSL + 偏好）', zodShape: {} },
-  { name: 'activate_strategy', description: '激活策略进入运行（受限操作：需人工批准流程）', zodShape: { strategyId: z.string() } },
-  { name: 'deactivate_strategy', description: '停用策略（受限操作：纠正类动作，需批准流程）', zodShape: { strategyId: z.string(), reason: z.string().default('') } },
-  // —— 回测 ——
-  { name: 'run_backtest', description: '对策略版本发起回测（异步任务，返回 runId）', zodShape: { strategyVersionId: z.string(), start: z.string(), end: z.string() } },
-  { name: 'get_backtest_result', description: '查询回测结果（指标与报告）', zodShape: { runId: z.string() } },
-  { name: 'get_backtest_trades', description: '查询回测成交明细', zodShape: { runId: z.string() } },
-  { name: 'list_backtests', description: '列出回测任务（全部策略版本，含状态与结论）', zodShape: {} },
+  // —— 策略管理（每账户唯一一份：Markdown 纯文本策略文档 = 交易策略 + 用户偏好，注入系统提示词） ——
+  { name: 'get_strategy', description: '获取当前账户生效策略文档（Markdown，含交易策略与用户偏好）与版本统计（本金/盈亏/盈亏比/胜率）', zodShape: {} },
+  { name: 'get_strategy_versions', description: '当前账户策略的版本列表（含每版标题、变更记录、统计与创建时间）', zodShape: {} },
+  {
+    name: 'update_strategy',
+    description: '更新账户策略文档（Markdown 纯文本，交易策略 + 用户偏好等全部信息）。每次更新产生新版本并立即生效。必须提供简短标题（title）与一句话变更记录（changeLog）。修改前先用 get_strategy 读取现有文档，保留仍有效的部分。',
+    zodShape: {
+      markdown: z.string().min(10).describe('完整策略 Markdown 文档（自然语言，量化指标写具体数值，禁止内嵌 JSON/代码块）'),
+      title: z.string().min(1).max(40).describe('本次更新的简短标题（一句话概括策略要点）'),
+      changeLog: z.string().min(1).max(120).describe('本次变更的一句话描述')
+    }
+  },
+  // —— 评估记录 ——
+  { name: 'get_backtest_result', description: '查询策略评估记录（定性评估结论与理由）', zodShape: { runId: z.string() } },
+  { name: 'list_backtests', description: '列出策略评估记录（含结论）', zodShape: {} },
   // —— 账户、资金与风控（资金/持仓按账户隔离） ——
   { name: 'list_accounts', description: '列出本地账户（账户隔离资金与持仓；数据/策略/模型全局通用）', zodShape: {} },
   { name: 'get_account_summary', description: '当前活跃账户概览：仓位、现金、持仓明细', zodShape: {} },

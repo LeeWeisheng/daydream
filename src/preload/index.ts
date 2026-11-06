@@ -55,10 +55,7 @@ const api: DaydreamApi = {
     getForAccount: (accountId) => invoke(IPC.strategyGetForAccount, accountId),
     save: (req) => invoke(IPC.strategySave, req),
     getVersions: (strategyId) => invoke(IPC.strategyGetVersions, strategyId),
-    rollback: (accountId, versionId) => invoke(IPC.strategyRollback, { accountId, versionId }),
-    activate: (accountId) => invoke(IPC.strategyActivate, { accountId }),
-    deactivate: (accountId) => invoke(IPC.strategyDeactivate, { accountId }),
-    getLatestBacktest: (accountId) => invoke(IPC.strategyGetLatestBacktest, accountId)
+    setActiveVersion: (accountId, versionId) => invoke(IPC.strategySetActiveVersion, { accountId, versionId })
   },
   trades: {
     order: (req) => invoke(IPC.tradeOrder, req),

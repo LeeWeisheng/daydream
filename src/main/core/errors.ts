@@ -27,9 +27,6 @@ export const USER_ERRORS: Record<string, UserErrorCode> = {
   not_cancellable: { code: 'not_cancellable', en: 'The work item cannot be cancelled', zh: '该工作项当前状态不可取消' },
   insufficient_cash: { code: 'insufficient_cash', en: 'Insufficient available cash', zh: '可用资金不足' },
   insufficient_position: { code: 'insufficient_position', en: 'Insufficient position', zh: '持仓不足' },
-  preference_user_only: { code: 'preference_user_only', en: 'Preferences may only be changed by a person', zh: '用户偏好仅用户可修改' },
-  invalid_dsl: { code: 'invalid_dsl', en: 'The strategy DSL is invalid', zh: '策略 DSL 校验失败' },
-  invalid_preferences: { code: 'invalid_preferences', en: 'The preferences are invalid', zh: '用户偏好校验失败' },
   risk_rejected: { code: 'risk_rejected', en: 'The signal was rejected by risk control', zh: '风控拒绝该信号' },
   trade_conflict: { code: 'trade_conflict', en: 'The trade conflicts with current state', zh: '交易与当前状态冲突' }
 }

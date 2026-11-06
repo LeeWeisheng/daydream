@@ -1,7 +1,7 @@
 /**
  * 自动盯盘（monitor）：盘中每 1~5 分钟由调度器定时任务**直跑**（不经 LLM 评估）。
- * 规则由 Agent 预先配置：止损/止盈阈值读取账户唯一策略 DSL 的 exit 条件（stop_loss/take_profit），
- * 其余阈值内置；因此每轮检查零 token 消耗。
+ * 止损/止盈阈值使用内置默认值（策略为纯文本，盘中的精确止损判断由 Agent 决策环节基于策略文档完成）；
+ * 因此每轮检查零 token 消耗。
  * 范围：持仓 ∪ 自选池；检查涨跌停接近、量能异动、指数急跌、止损/止盈线触及、信号失效。
  * 预警分级：info 仅记录 / warn 系统通知 / critical 直接生成 need_decision 汇报（均不触发 Agent 评估）。
  */
@@ -13,7 +13,7 @@ import { raiseAlert } from '../alerts/service'
 import { expireSignal } from '../signals/service'
 import { publishReport } from '../reports/service'
 
-/** 盯盘规则阈值：止损/止盈优先取策略 DSL（Agent 预配置），其余内置 */
+/** 盯盘规则阈值：内置默认值（策略为纯文本文档，不提供结构化阈值） */
 interface MonitorThresholds {
   stopLossPct: number
   takeProfitPct: number
@@ -30,20 +30,9 @@ const DEFAULT_THRESHOLDS: MonitorThresholds = {
   indexDropPct: 0.02
 }
 
-/** 读取 Agent 预先配置在策略 DSL 中的止损/止盈阈值（无则用默认） */
-function resolveThresholds(accountId: string): MonitorThresholds {
-  const t = { ...DEFAULT_THRESHOLDS }
-  try {
-    const row = queryAll<{ dsl_json: string }>('SELECT dsl_json FROM strategy WHERE account_id = ?', [accountId])[0]
-    const dsl = JSON.parse(row.dsl_json) as { exit?: { conditions?: { indicator: string; params?: Record<string, unknown> }[] } }
-    for (const c of dsl.exit?.conditions ?? []) {
-      if (c.indicator === 'stop_loss' && typeof c.params?.pct === 'number') t.stopLossPct = c.params.pct
-      if (c.indicator === 'take_profit' && typeof c.params?.pct === 'number') t.takeProfitPct = c.params.pct
-    }
-  } catch {
-    /* DSL 异常时用默认阈值 */
-  }
-  return t
+/** 阈值读取：策略为纯文本文档，无结构化阈值，使用内置默认值 */
+function resolveThresholds(_accountId: string): MonitorThresholds {
+  return { ...DEFAULT_THRESHOLDS }
 }
 
 export async function run(accountId: string): Promise<{ alerts: number }> {
@@ -81,7 +70,7 @@ export async function run(accountId: string): Promise<{ alerts: number }> {
       if (pct >= rate - thresholds.limitApproachPct) reportAlert('warn', 'limit_up_approach', { code: quote.code, name: quote.name, pctChg: quote.pctChg })
       if (pct <= -(rate - thresholds.limitApproachPct)) reportAlert('warn', 'limit_down_approach', { code: quote.code, name: quote.name, pctChg: quote.pctChg })
     }
-    // 止损/止盈线触及（阈值来自策略 DSL，Agent 预配置）
+    // 止损/止盈线触及（内置默认阈值；策略为纯文本，精确阈值由 Agent 决策环节掌握）
     const pos = queryAll<{ cost_price: number }>('SELECT cost_price FROM position WHERE account_id = ? AND code = ?', [accountId, quote.code])[0]
     if (pos && pos.cost_price > 0) {
       const pnl = quote.price / pos.cost_price - 1
